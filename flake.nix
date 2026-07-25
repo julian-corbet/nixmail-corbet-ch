@@ -1,5 +1,5 @@
 {
-  description = "Self-hosted mail + identity stack: Stalwart, an LDAP directory, a webmail frontend, and the two glue daemons that make outbound/inbound delivery work on an IPv6-only host behind an HTTP-only inbound mail route.";
+  description = "Self-hosted mail stack: Stalwart, a webmail frontend, and the two glue daemons that make outbound/inbound delivery work on an IPv6-only host behind an HTTP-only inbound mail route. Identity (an LDAP directory, OIDC SSO) is out of scope here -- see README.";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -25,7 +25,6 @@
       # behind it documents a boundary that doesn't exist).
       # ---------------------------------------------------------------
       nixosModules.stalwart = ./modules/stalwart.nix;
-      nixosModules.lldap = ./modules/lldap.nix;
       nixosModules.bulwark = ./modules/bulwark.nix;
       nixosModules."outbound-bridge" = ./modules/outbound-bridge.nix;
       nixosModules."inbound-bridge" = ./modules/inbound-bridge.nix;

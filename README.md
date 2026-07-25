@@ -1,26 +1,39 @@
 # nixmail
 
-A self-hosted mail + identity stack for a single small NixOS box: Stalwart
-(unified IMAP/JMAP/SMTP), an LDAP directory, a webmail frontend, and the
-two small glue daemons that make outbound and inbound delivery work on an
-IPv6-only host sitting behind an HTTP-only inbound mail route.
+A self-hosted mail stack for a single small NixOS box: Stalwart (unified
+IMAP/JMAP/SMTP), a webmail frontend, and the two small glue daemons that
+make outbound and inbound delivery work on an IPv6-only host sitting
+behind an HTTP-only inbound mail route.
 
-**Status: alpha.** Five NixOS modules are extracted, wired into
+**Status: alpha.** Four NixOS modules are extracted, wired into
 `flake.nix`, and pass `nix flake check` plus a standalone `evalModules`
-composition test (all five imported together against a placeholder
+composition test (all four imported together against a placeholder
 two-domain config, zero namespace collisions). None of this has run a
-real NixOS VM test yet, and two pieces of the originally-planned stack —
-an OIDC SSO provider and a password manager — have not been extracted at
-all. See "What's shipped" and "What's not shipped yet" below for the
-precise line.
+real NixOS VM test yet. See "What's shipped" and "Out of scope" below for
+the precise line.
+
+## Scope
+
+nixmail covers mail transport, webmail, and the two delivery bridges
+ONLY. **Identity — an LDAP directory and OIDC/SSO — is explicitly out of
+scope** and lives in a separate identity project. Nothing in this repo
+ships, bundles, or requires a specific directory implementation:
+Stalwart's `services.nixmail.stalwart.ldap.*` options (`url`, `baseDn`,
+`bindDn`, `bindPasswordFile`, the search filters, the attribute
+mappings) stand entirely on their own, so any LDAP-speaking directory
+can back it — one from a separate identity project, or an unrelated
+external LDAP server. This repo does not provide, and has never
+provided, a directory server, an OIDC/SSO provider, or a password
+manager.
 
 ## What this is
 
 The mechanism behind a real, live self-hosted deployment: a mail server
-authenticates every user against an LDAP directory (no internal user
-store), a webmail frontend talks to the mail server's JMAP API directly,
-and two small Python bridges glue the mail server to the outside world on
-a host that can't do plain inbound/outbound SMTP the normal way:
+authenticates every user against an LDAP directory it does not itself
+provide (no internal user store), a webmail frontend talks to the mail
+server's JMAP API directly, and two small Python bridges glue the mail
+server to the outside world on a host that can't do plain inbound/outbound
+SMTP the normal way:
 
 - **outbound-bridge**: SMTP→HTTPS relay. The mail server relays outbound
   mail to this bridge as if it were an ordinary smarthost; the bridge
@@ -33,23 +46,22 @@ a host that can't do plain inbound/outbound SMTP the normal way:
   the mail server's local LMTP listener, one transaction per recipient,
   and maps the LMTP result back onto a retry-or-don't-retry HTTP status.
 
-Every module wraps a specific real upstream (Stalwart, lldap, Bulwark) —
-none of them hide behind an invented abstract role name. See each
-module's own header comment for why: a generic interface with exactly
-one implementation behind it documents a boundary that doesn't exist yet.
+Every module wraps a specific real upstream (Stalwart, Bulwark) — none of
+them hide behind an invented abstract role name. See each module's own
+header comment for why: a generic interface with exactly one
+implementation behind it documents a boundary that doesn't exist yet.
 
 ## What's shipped
 
-All five live under `modules/` and are exported from `flake.nix` as
+All four live under `modules/` and are exported from `flake.nix` as
 `nixosModules.<name>`. Each is independent — there is no shared "core" to
 opt into first, unlike some sibling nix* repos (nixnet's engine+providers
-shape doesn't apply here: these are five separate services, not one
+shape doesn't apply here: these are four separate services, not one
 engine with pluggable transports).
 
 | `nixosModules.<name>` | Option namespace | Wraps | Notes |
 |---|---|---|---|
-| `stalwart` | `services.nixmail.stalwart` | Stalwart 0.16.x (own module, not nixpkgs' `services.stalwart`, which still targets Stalwart's abandoned 0.15 TOML config shape) | Renders Stalwart's post-0.15 registry-object config (domains, listeners, LDAP directory, TLS, MTA routing, CORS, webui, spam rules) as an NDJSON apply-plan applied once via `stalwart-cli`. **Create-only, bootstrap-only — not a reconciler**: re-applying to an already-configured database is refused, not merged. Changing options after first boot does not reach a live server; reconcile by hand with `stalwart-cli`. DKIM is out of scope (manual step). `domains` is a real `attrsOf` submodule — every configured domain's `catchAll`/`subAddressing` reaches the rendered plan, checked directly in the eval test. |
-| `lldap` | `services.nixmail.lldap` | [lldap](https://github.com/lldap/lldap) | Manages the server (process, listeners, unit) only. Deliberately exposes no options for declaring users/groups/passwords/alias values — those are live data, not configuration, and a real deployment lost data once to a declarative job that matched-and-overwrote existing directory entries by DN. Documents lldap's own attribute-name lowercasing behavior, which silently breaks case-sensitive lookups in anything that reads from it. |
+| `stalwart` | `services.nixmail.stalwart` | Stalwart 0.16.x (own module, not nixpkgs' `services.stalwart`, which still targets Stalwart's abandoned 0.15 TOML config shape) | Renders Stalwart's post-0.15 registry-object config (domains, listeners, an LDAP directory client, TLS, MTA routing, CORS, webui, spam rules) as an NDJSON apply-plan applied once via `stalwart-cli`. The `ldap.*` options describe a directory *client* only — url, base DN, bind DN, bind-password file, search filters, attribute mappings — with no directory server bundled or assumed; point them at any LDAP-speaking directory (see "Scope" above). **Create-only, bootstrap-only — not a reconciler**: re-applying to an already-configured database is refused, not merged. Changing options after first boot does not reach a live server; reconcile by hand with `stalwart-cli`. DKIM is out of scope (manual step). `domains` is a real `attrsOf` submodule — every configured domain's `catchAll`/`subAddressing` reaches the rendered plan, checked directly in the eval test. |
 | `bulwark` | `services.nixmail.bulwark` | [Bulwark](https://github.com/bulwark-app) webmail (JMAP client, shipped upstream only as an OCI image) | Runs it as a rootless podman container. Bakes the OCI image into the Nix store at *build* time (`dockerTools.pullImage`) instead of pulling at runtime — the generalizable fix for any IPv4-only registry being unreachable from an IPv6-only host. Documents the JMAP-session-returns-absolute-URLs trap that silently breaks attachments/EventSource behind a loopback backend URL. |
 | `outbound-bridge` | `services.nixmail.outboundBridge` | in-repo (`outbound-bridge/bridge.py`, aiosmtpd) | No upstream equivalent exists — providers ship client libraries, not an SMTP-shaped protocol translator. `allowedClients` defaults to loopback-only and is hard-asserted non-empty; `bindHost` is hard-asserted non-wildcard (aiosmtpd's `Controller` takes exactly one bind address — "bind everywhere" replaces, not adds to, the loopback exposure). |
 | `inbound-bridge` | `services.nixmail.inboundBridge` | in-repo (`inbound-bridge/bridge.py`, stdlib `http.server` + `smtplib`) | Deliberately dumb: no parsing, no Sieve, no alias resolution — all of that stays the mail server's job. Refuses to start with no secret configured unless `allowUnauthenticated` is explicitly set (a real gap in the deployment this was extracted from: an empty secret used to just log a warning and run open). Only ever declares soft (`after`) ordering on the mail server's unit, never `requires` — the relationship is a live, retried network call, not a boot-order dependency. |
@@ -63,13 +75,6 @@ account identifier; every example in this README uses `example.org` /
 
 ## What's not shipped yet
 
-- **OIDC SSO provider** (`pocket-id` in the reference deployment) and
-  **password manager** (`vaultwarden`) — not extracted. The reference
-  deployment's SSO↔LDAP-sync wiring (bind DN, filters, attribute mapping)
-  is *entirely* runtime state in the SSO provider's own database with no
-  Nix representation at all today; a public module for it would have an
-  honest, near-empty option surface, which needs its own design pass
-  rather than a copy-paste.
 - **Cloudflare Workers** (inbound-routing worker, JMAP-CORS worker) —
   part of the reference deployment's mechanism but not part of this repo.
   Not started.
@@ -93,20 +98,14 @@ account identifier; every example in this README uses `example.org` /
   # host configuration.nix:
   imports = [
     inputs.nixmail.nixosModules.stalwart
-    inputs.nixmail.nixosModules.lldap
     inputs.nixmail.nixosModules.bulwark
     inputs.nixmail.nixosModules."outbound-bridge"
     inputs.nixmail.nixosModules."inbound-bridge"
   ];
 
-  services.nixmail.lldap = {
-    enable = true;
-    domain = "example.org";                     # placeholder — your real domain
-    jwtSecretFile = "/run/secrets/lldap-jwt";
-    adminPasswordFile = "/run/secrets/lldap-admin";
-    keySeedEnvFile = "/run/secrets/lldap-seed";
-  };
-
+  # Bring your own LDAP directory -- this repo does not ship one (see
+  # "Scope" above). `ldap.*` below just needs a directory that already
+  # exists and answers on this URL/baseDn with a bind account it can use.
   services.nixmail.stalwart = {
     enable = true;
     domains."example.org" = { };
@@ -147,7 +146,7 @@ account identifier; every example in this README uses `example.org` /
 ```
 
 This is the exact shape checked by this repo's own composition test (all
-five modules imported together, evaluated with `lib.evalModules`/
+four modules imported together, evaluated with `lib.evalModules`/
 `nixosSystem` against placeholder values) — it type-checks and renders,
 but has not been booted in a VM.
 
@@ -163,12 +162,15 @@ than a straight copy:
    database. A real deployment's live domain list, catch-alls, DKIM
    keys, and MTA routing end up partly Nix-declared (at first boot) and
    partly runtime API state configured out-of-band with zero Nix
-   representation. An SSO provider's LDAP-sync wiring is *entirely*
-   runtime state in its own database — a module for it would have an
-   empty option surface by design. Any module here has to be honest
-   about which parts it actually manages declaratively and which remain
-   a documented manual step, rather than pretend a create-only bootstrap
-   is a live reconciler.
+   representation. (Identity — the LDAP directory itself, any OIDC/SSO
+   provider in front of it — is deliberately out of scope for this repo;
+   see "Scope" above. A directory-sync-driven SSO provider's wiring is
+   *entirely* runtime state in its own database, which is part of why
+   identity was drawn as its own project boundary instead of one more
+   module here.) Any module here has to be honest about which parts it
+   actually manages declaratively and which remain a documented manual
+   step, rather than pretend a create-only bootstrap is a live
+   reconciler.
 2. **The domain/mailbox topology is real, private data, not mechanism** —
    it belongs in whatever repo *consumes* this one (a private
    `manifest`-shaped file supplying real domains, catch-alls, and base
@@ -191,11 +193,10 @@ than a straight copy:
 
 ```
 nixmail/
-  flake.nix                    # nixosModules.{stalwart,lldap,bulwark,
+  flake.nix                    # nixosModules.{stalwart,bulwark,
                                 #   outbound-bridge,inbound-bridge}
   modules/
     stalwart.nix
-    lldap.nix
     bulwark.nix
     outbound-bridge.nix + outbound-bridge/bridge.py
     inbound-bridge.nix + inbound-bridge/bridge.py
