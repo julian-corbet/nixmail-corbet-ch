@@ -1029,6 +1029,53 @@ in
         opening these ports directly).
       '';
     };
+
+    queueMonitor = {
+      enable = mkOption {
+        type = types.bool;
+        default = false;
+        description = ''
+          Periodically fail a systemd unit when outbound mail is piling up in
+          the queue instead of being delivered.
+
+          WHY THIS EXISTS. Liveness checks do not detect a dead relay. A mail
+          server can accept submissions, answer on every port, serve its web
+          UI and pass every TCP/HTTPS probe you point at it while delivering
+          NOTHING -- because the outbound leg is a separate path that only
+          runs when a message is actually queued. That failure mode is
+          SILENT: senders get a clean 250, nothing bounces (the queue is
+          retrying, not rejecting), and the operator finds out days or weeks
+          later from a human saying "did you get my mail?".
+
+          This check watches the one signal that distinguishes the two:
+          messages sitting in the queue past `maxAgeMinutes`. A healthy
+          server drains its queue continuously, so a message older than a
+          few minutes means delivery is failing, whatever the ports say.
+
+          The unit FAILS (non-zero exit) rather than notifying, deliberately:
+          this module has no opinion on how you alert. A failed systemd unit
+          is the lowest common denominator every monitoring system already
+          understands -- scrape `systemctl --failed`, let your fleet monitor
+          catch it, or add an `OnFailure=` of your own.
+        '';
+      };
+      maxAgeMinutes = mkOption {
+        type = types.ints.positive;
+        default = 30;
+        description = ''
+          Fail if any queued message is older than this. Keep it comfortably
+          above your longest legitimate retry backoff: a remote server being
+          briefly unreachable is normal and self-heals, and alerting on that
+          trains people to ignore the alert. 30 minutes catches a genuinely
+          broken relay while riding out ordinary transient failures.
+        '';
+      };
+      interval = mkOption {
+        type = types.str;
+        default = "*:0/15";
+        description = "systemd OnCalendar expression for how often to check.";
+      };
+    };
   };
 
   config = mkIf cfg.enable {
@@ -1144,6 +1191,47 @@ in
             chown ${cfg.user}:${cfg.group} /run/stalwart/recovery-admin.env
           ''))
         ];
+      };
+    };
+
+    # Outbound-delivery health. See queueMonitor's option docs for why a port
+    # probe cannot detect a dead relay and this can.
+    systemd.services.stalwart-queue-monitor = mkIf cfg.queueMonitor.enable {
+      description = "Fail if outbound mail is stuck in the Stalwart queue";
+      after = [ "stalwart.service" ];
+      serviceConfig.Type = "oneshot";
+      script = ''
+        set -u
+        # Read the password rather than sourcing it: the file is a plain
+        # secret, and its value may legitimately contain shell metacharacters.
+        pw=$(cat ${lib.escapeShellArg cfg.recoveryAdmin.passwordFile})
+        cli="${cfg.cliPackage}/bin/stalwart-cli --url http://127.0.0.1:8080 --user ${lib.escapeShellArg cfg.recoveryAdmin.username} --password $pw"
+
+        # A message still queued past the threshold means delivery is failing.
+        # The CLI prints two ISO-8601 columns per row, "Next Retry" then
+        # "Received". Key on RECEIVED (the LAST timestamp on the line) -- age
+        # in the queue is the signal. Matching any timestamp would also fire on
+        # an overdue Next Retry, which is a different and noisier condition.
+        cutoff=$(date -u -d "-${toString cfg.queueMonitor.maxAgeMinutes} minutes" +%Y-%m-%dT%H:%M:%SZ)
+        stuck=$($cli query QueuedMessage 2>/dev/null \
+          | awk -v c="$cutoff" 'NR>1 { r=""; for (i=1;i<=NF;i++) if ($i ~ /^[0-9]{4}-[0-9]{2}-[0-9]{2}T/) r=$i; if (r != "" && r < c) print }' \
+          | wc -l)
+
+        if [ "$stuck" -gt 0 ]; then
+          echo "stalwart-queue-monitor: $stuck message(s) queued longer than ${toString cfg.queueMonitor.maxAgeMinutes}m -- OUTBOUND DELIVERY IS FAILING" >&2
+          echo "hint: check the delivery log for connect-errors; a stale cached relay route needs a FULL service restart, reload is not enough" >&2
+          exit 1
+        fi
+        echo "stalwart-queue-monitor: queue draining normally"
+      '';
+    };
+
+    systemd.timers.stalwart-queue-monitor = mkIf cfg.queueMonitor.enable {
+      description = "Periodic outbound-queue health check";
+      wantedBy = [ "timers.target" ];
+      timerConfig = {
+        OnCalendar = cfg.queueMonitor.interval;
+        Persistent = true;
       };
     };
 
