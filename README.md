@@ -5,19 +5,39 @@ IMAP/JMAP/SMTP), a webmail frontend, and the two small glue daemons that
 make outbound and inbound delivery work on an IPv6-only host sitting
 behind an HTTP-only inbound mail route.
 
-**Status: alpha.** Four NixOS modules are extracted and wired into
-`flake.nix`. This repository has **no automated checks yet** — `flake.nix`
-exposes no `checks` output, so nothing here evaluates the modules, and an
-earlier version of this section claimed a `nix flake check` pass and a
-standalone `evalModules` composition test that do not exist. Adding a real
-composition check is the next task.
+**Status: alpha.** Four NixOS modules, plus two bridge daemons that are real
+programs rather than configuration — so the daemons get real tests and the
+modules get an evaluation check. `nix flake check` runs three things:
 
-What is genuinely true is stronger: all four modules are
-running live in a real production deployment (a small single-node host,
-outside this repo) — not just evaluated: outbound and inbound mail have
-both been proven end to end with real messages through that deployment.
-What's still missing is an automated `nixosTest` in this repo's own CI;
-see "What's shipped" and "Out of scope" below for the precise line.
+| check | what it establishes |
+|---|---|
+| `inbound-bridge-tests` | 15 tests over the HTTP→LMTP bridge: the 4xx→421 / 5xx→550 status mapping, one LMTP transaction per recipient, partial success counting as success, an exception surfacing as retryable rather than a drop, and refusing to start unauthenticated |
+| `outbound-bridge-tests` | 21 tests over the SMTP→HTTP bridge: the allow-list defaulting to loopback, at most one relay per message, total failure deferring instead of bouncing, and envelope recipients winning over header recipients |
+| `modules-evaluate` | all four modules composed into one NixOS system, which is what catches a collision in the shared `services.nixmail.*` namespace |
+
+Both suites are stdlib `unittest`, run offline, and send no mail.
+
+What they pin is deliberately the set of behaviours that fail **silently**. A
+status mapped the wrong way does not raise — it makes a caller retry a hard
+refusal forever, or discard a message that only needed retrying. An allow-list
+that widens by accident does not raise either: it turns a listener holding a paid
+provider account's credentials into an open relay, which is the incident the
+outbound bridge's own comments record from an earlier version that defaulted its
+bind address to `0.0.0.0`. Both are proven in the failing direction — widen the
+default and two tests fail, one of them by observing a rejected client reach the
+relay chain.
+
+An earlier version of this section claimed a `nix flake check` pass and a
+standalone `evalModules` composition test at a time when the flake had no
+`checks` output at all. That has been replaced by the table above rather than
+quietly corrected.
+
+Still stronger than any of it: all four modules run in a real production
+deployment (a small single-node host, outside this repo), and outbound and
+inbound mail have both been proven end to end with real messages through it.
+What remains missing is a `nixosTest` exercising actual service startup — these
+checks test units and daemons, not a booted machine. See "What's shipped" and
+"Out of scope" below for the precise line.
 
 ## Scope
 
@@ -152,11 +172,11 @@ account identifier; every example in this README uses `example.org` /
 }
 ```
 
-This is the shape a configuration takes. Note that nothing in this
-repository verifies it: there is no composition test here, despite an
-earlier version of this section describing one. A configuration of this
-shape (with real, non-placeholder values) is what boots the live
-production deployment mentioned above, which is the actual evidence; this repo
+This is the shape a configuration takes, and the `modules-evaluate` check
+verifies a placeholder version of exactly this shape — see
+[examples/host](examples/host). A configuration of this shape (with real,
+non-placeholder values) is what boots the live production deployment
+mentioned above, which remains the stronger evidence; this repo
 itself still has no automated `nixosTest` exercising real service
 startup.
 
