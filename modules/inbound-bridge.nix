@@ -161,6 +161,32 @@ in
       default = "INFO";
       description = "Python `logging` level name for the bridge's own stdout logs (captured by the systemd journal).";
     };
+
+    dependsOnUnits = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      default = [ ];
+      example = [ "my-secrets-render.service" ];
+      description = ''
+        Extra systemd units this bridge depends on -- typically whatever
+        unit renders `secretFile`. Wired into BOTH `after` AND `requires`
+        for every unit listed here, deliberately: ordering alone only
+        delays this service relative to those units, it does not make
+        systemd verify they actually reached an active state first, and a
+        secrets-rendering unit that starts late or fails is exactly the
+        case where that distinction matters. This option exists
+        specifically so the module never has to hardcode a dependency on
+        any one secrets-delivery mechanism, mirroring
+        outbound-bridge.nix's option of the same name. Use it for a
+        sops-nix/agenix activation unit, a systemd-credential-fetching
+        oneshot, a cloud-metadata polling service, or leave it empty if
+        `secretFile` is simply present at boot with no unit of its own.
+
+        This is unrelated to this module's soft-only ordering against the
+        mail server's own LMTP-listening unit (see this file's header
+        comment) -- that relationship stays soft-ordered by design; this
+        option is only about whatever provisions `secretFile`.
+      '';
+    };
   };
 
   config = lib.mkIf cfg.enable {
@@ -186,10 +212,13 @@ in
     systemd.services.nixmail-inbound-bridge = {
       description = "Inbound HTTP -> LMTP mail bridge";
       wantedBy = [ "multi-user.target" ];
-      # Soft ordering only -- see this file's header comment for why this
-      # module never adds a hard `requires` on the mail server's own unit.
-      after = [ "network-online.target" ];
+      # Soft ordering only against the mail server's own unit -- see this
+      # file's header comment for why this module never adds a hard
+      # `requires` there. `dependsOnUnits` below is a separate concern
+      # (whatever provisions `secretFile`) and DOES get a hard `requires`.
+      after = [ "network-online.target" ] ++ cfg.dependsOnUnits;
       wants = [ "network-online.target" ];
+      requires = cfg.dependsOnUnits;
 
       environment = {
         INBOUND_BRIDGE_HOST = cfg.listenHost;

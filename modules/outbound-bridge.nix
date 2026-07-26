@@ -39,17 +39,25 @@
 #      middle ground with this library; the assertion below refuses a
 #      wildcard bind outright rather than let that mistake happen twice.
 #   2. This listener has NO authentication of its own (no SMTP AUTH, no
-#      STARTTLS) -- `allowedClients` is the ONLY access control, which is
-#      why it defaults to loopback-only rather than to "no check at all".
-#      An earlier, unpublished version of this exact bridge shipped with
-#      no client check whatsoever and relied entirely on its bind address
-#      for isolation; the two mistakes compounded (a wide bind AND no
-#      allowlist) into an open relay against paid provider accounts,
+#      STARTTLS) -- the client allowlist is the ONLY access control, which
+#      is why it defaults to loopback-only rather than to "no check at
+#      all". An earlier, unpublished version of this exact bridge shipped
+#      with no client check whatsoever and relied entirely on its bind
+#      address for isolation; the two mistakes compounded (a wide bind AND
+#      no allowlist) into an open relay against paid provider accounts,
 #      reachable by anyone who could route a TCP connection to the port,
 #      with no error and no failed delivery to hint at it. Both defaults
 #      in this module are closed; you have to widen both deliberately, and
 #      the assertions below refuse the specific combinations already known
-#      to be dangerous.
+#      to be dangerous. `bindHost` itself is ALWAYS folded into the
+#      effective allowlist alongside `allowedClients` (see
+#      `effectiveAllowedClients` below) -- an earlier revision of this
+#      module left that derivation out, so following lesson 1 above (set
+#      `bindHost` to the box's real address) while leaving `allowedClients`
+#      at its loopback-only default produced a bridge that rejected every
+#      single relay attempt: the one address the docs told you to bind was
+#      never itself in the allowlist. A module's default must not reject
+#      the exact configuration its own docs tell you to use.
 #   3. Secrets delivery must never be hardcoded to one mechanism. A public
 #      module cannot assume sops-nix, agenix, a cloud-metadata fetcher, or
 #      any other one convention -- `dependsOnUnits` below is an ordinary
@@ -80,6 +88,18 @@ let
   bridge = ./outbound-bridge/bridge.py;
 
   relayNames = [ "brevo" "resend" "mailersend" "smtp2go" "postmark" ];
+
+  # `bindHost` is ALWAYS itself permitted to relay, unconditionally, on top
+  # of whatever `allowedClients` adds -- see the option docs on both for
+  # why. Without this derivation, following this module's own `bindHost`
+  # guidance (set it to the host's real, stable, non-loopback address) while
+  # leaving `allowedClients` at its loopback-only default produced a bridge
+  # that rejected every single relay attempt with "550 5.7.1 relaying
+  # denied": the one address the docs told you to bind was never itself in
+  # the allowlist. `unique` just avoids a harmless duplicate env var entry
+  # when bindHost is already loopback (the common case, where it's already
+  # covered by allowedClients' own default).
+  effectiveAllowedClients = unique (cfg.allowedClients ++ [ cfg.bindHost ]);
 in
 {
   options.services.nixmail.outboundBridge = {
@@ -126,8 +146,18 @@ in
         anti-SSRF guard refuses a loopback relay target (many do, on
         purpose), set this to the host's own stable non-loopback address
         instead, matching whatever address you configure as that server's
-        smarthost -- and narrow `allowedClients` to that same source when
-        you do.
+        smarthost.
+
+        This address is ALWAYS itself permitted to relay through the
+        bridge, unconditionally and automatically (see `allowedClients`
+        below) -- you do not need to, and should not need to, also add it
+        to `allowedClients` yourself. Only add entries to `allowedClients`
+        for some OTHER source that also needs to reach this bridge (for
+        example, your mail server's outbound connections arrive from a
+        container/pod network address that differs from this host's own
+        bind address because of NAT in between -- this happens routinely
+        when the mail server and the bridge are on the same host but in
+        different network namespaces).
 
         Do NOT set this to a wildcard/any-interface address ("0.0.0.0" or
         "::") to work around that restriction: aiosmtpd's `Controller`
@@ -150,20 +180,26 @@ in
       default = [ "127.0.0.1/32" "::1/128" ];
       example = [ "203.0.113.10" "203.0.113.0/24" ];
       description = ''
-        Source addresses (individual addresses or CIDRs) allowed to relay
-        mail through this bridge, enforced by bridge.py itself at the SMTP
-        protocol level -- this is the bridge's ONLY access control, since
-        it implements no SMTP AUTH. Defaults to loopback only, which is
-        deliberately NOT the same as "no check applied": an earlier,
+        ADDITIONAL source addresses (individual addresses or CIDRs) allowed
+        to relay mail through this bridge, enforced by bridge.py itself at
+        the SMTP protocol level -- this is the bridge's ONLY access control,
+        since it implements no SMTP AUTH. Defaults to loopback only, which
+        is deliberately NOT the same as "no check applied": an earlier,
         unpublished version of this bridge treated an unconfigured
         allowlist as "trust anyone who can connect", and that default is
         precisely what turned a bind-address mistake into an open relay
         against paid provider accounts (see this file's header comment).
+
+        `bindHost` is ALWAYS permitted too, unconditionally, on top of
+        whatever is listed here (see this option's use in `config` below) --
+        this list only needs entries for sources OTHER than `bindHost`
+        itself. It is safe to leave this at its default, or even set it to
+        `[ ]`, once `bindHost` alone covers every source that actually needs
+        to relay through this bridge.
+
         Narrow or widen this to match exactly what `bindHost` (and any
         NAT/firewall in front of it) actually exposes -- the two settings
         are independent, and getting only one of them right is not enough.
-        Must not be left empty; the module rejects that at eval time (see
-        `assertions` below) rather than let "empty" quietly mean "open".
       '';
     };
 
@@ -346,19 +382,14 @@ in
           this service from.
         '';
       }
-      {
-        assertion = cfg.allowedClients != [ ];
-        message = ''
-          services.nixmail.outboundBridge.allowedClients must not be empty.
-          This bridge has no other access control, so an empty list
-          doesn't mean "trust nothing extra" -- it would mean "nothing can
-          ever relay through this bridge at all" if the module let it
-          through as a no-op, which is never actually what's wanted for a
-          service meant to run. (Kept as a hard failure rather than a
-          silent "allow everyone" fallback -- that fallback is the exact
-          mistake this module exists to not repeat.)
-        '';
-      }
+      # There used to be an assertion here rejecting an empty
+      # `allowedClients`. It no longer applies: `bindHost` is now always
+      # folded into the effective allowlist (`effectiveAllowedClients`
+      # above), so the "nothing can ever relay through this bridge" failure
+      # mode that assertion existed to catch is now structurally
+      # impossible -- `bindHost` is a required, always-non-empty address,
+      # so the effective list sent to bridge.py can never be empty even
+      # when `allowedClients` itself is deliberately set to `[ ]`.
       {
         assertion = cfg.relayChain == null || (length cfg.relayChain == length (unique cfg.relayChain));
         message = ''
@@ -381,7 +412,7 @@ in
       environment = {
         BRIDGE_HOST = cfg.bindHost;
         BRIDGE_PORT = toString cfg.port;
-        BRIDGE_ALLOWED_CLIENTS = concatStringsSep "," cfg.allowedClients;
+        BRIDGE_ALLOWED_CLIENTS = concatStringsSep "," effectiveAllowedClients;
         BRIDGE_RELAY_CHAIN = if cfg.relayChain == null then "" else concatStringsSep "," cfg.relayChain;
         BRIDGE_MS_ROUTING_RELAY = cfg.msRouting.relay;
         BRIDGE_MS_ROUTING_ENABLE = if cfg.msRouting.enable then "true" else "false";
