@@ -8,9 +8,12 @@ behind an HTTP-only inbound mail route.
 **Status: alpha.** Four NixOS modules are extracted, wired into
 `flake.nix`, and pass `nix flake check` plus a standalone `evalModules`
 composition test (all four imported together against a placeholder
-two-domain config, zero namespace collisions). None of this has run a
-real NixOS VM test yet. See "What's shipped" and "Out of scope" below for
-the precise line.
+two-domain config, zero namespace collisions). All four modules are also
+running live in a real production deployment (a small single-node host,
+outside this repo) — not just evaluated: outbound and inbound mail have
+both been proven end to end with real messages through that deployment.
+What's still missing is an automated `nixosTest` in this repo's own CI;
+see "What's shipped" and "Out of scope" below for the precise line.
 
 ## Scope
 
@@ -147,8 +150,11 @@ account identifier; every example in this README uses `example.org` /
 
 This is the exact shape checked by this repo's own composition test (all
 four modules imported together, evaluated with `lib.evalModules`/
-`nixosSystem` against placeholder values) — it type-checks and renders,
-but has not been booted in a VM.
+`nixosSystem` against placeholder values) — it type-checks and renders.
+A configuration of this shape (with real, non-placeholder values) is also
+what boots the live production deployment mentioned above; this repo
+itself still has no automated `nixosTest` exercising real service
+startup.
 
 ## Why this isn't a trivial extraction
 
