@@ -5,10 +5,14 @@ IMAP/JMAP/SMTP), a webmail frontend, and the two small glue daemons that
 make outbound and inbound delivery work on an IPv6-only host sitting
 behind an HTTP-only inbound mail route.
 
-**Status: alpha.** Four NixOS modules are extracted, wired into
-`flake.nix`, and pass `nix flake check` plus a standalone `evalModules`
-composition test (all four imported together against a placeholder
-two-domain config, zero namespace collisions). All four modules are also
+**Status: alpha.** Four NixOS modules are extracted and wired into
+`flake.nix`. This repository has **no automated checks yet** — `flake.nix`
+exposes no `checks` output, so nothing here evaluates the modules, and an
+earlier version of this section claimed a `nix flake check` pass and a
+standalone `evalModules` composition test that do not exist. Adding a real
+composition check is the next task.
+
+What is genuinely true is stronger: all four modules are
 running live in a real production deployment (a small single-node host,
 outside this repo) — not just evaluated: outbound and inbound mail have
 both been proven end to end with real messages through that deployment.
@@ -148,11 +152,11 @@ account identifier; every example in this README uses `example.org` /
 }
 ```
 
-This is the exact shape checked by this repo's own composition test (all
-four modules imported together, evaluated with `lib.evalModules`/
-`nixosSystem` against placeholder values) — it type-checks and renders.
-A configuration of this shape (with real, non-placeholder values) is also
-what boots the live production deployment mentioned above; this repo
+This is the shape a configuration takes. Note that nothing in this
+repository verifies it: there is no composition test here, despite an
+earlier version of this section describing one. A configuration of this
+shape (with real, non-placeholder values) is what boots the live
+production deployment mentioned above, which is the actual evidence; this repo
 itself still has no automated `nixosTest` exercising real service
 startup.
 
