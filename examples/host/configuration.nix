@@ -4,12 +4,12 @@
 # This is not a machine anyone would run. Every domain is under example.com,
 # every secret is a path that does not exist, and the root filesystem is tmpfs.
 # It exists so the four modules can be type-checked together — they share the
-# `services.nixmail.*` namespace, and a collision between two of them is exactly
+# `nixmail.*` namespace, and a collision between two of them is exactly
 # what a per-module check cannot see.
 { ... }:
 {
   # The mail server itself.
-  services.nixmail.stalwart = {
+  nixmail.stalwart = {
     enable = true;
 
     # Keyed by the domain name itself — this attrset IS the data model the
@@ -44,7 +44,7 @@
   # Webmail. Its three required values are precisely the site facts it cannot
   # guess: where the mail server is, where state lives, and where credentials
   # come from.
-  services.nixmail.bulwark = {
+  nixmail.bulwark = {
     enable = true;
     jmapServerUrl = "https://mail.example.com";
     stateDir = "/var/lib/example/bulwark";
@@ -55,13 +55,13 @@
   # are left at their defaults deliberately — those defaults ARE the security
   # model for a listener with no authentication of its own, and the bridge's own
   # test suite pins them rather than this file restating them.
-  services.nixmail.outboundBridge = {
+  nixmail.outboundBridge = {
     enable = true;
     keysEnvFile = "/run/secrets/example-relay-keys";
   };
 
   # Inbound: HTTP in, LMTP out.
-  services.nixmail.inboundBridge = {
+  nixmail.inboundBridge = {
     enable = true;
     secretFile = "/run/secrets/example-inbound-secret";
   };

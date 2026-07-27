@@ -34,11 +34,11 @@
 { config, lib, pkgs, ... }:
 
 let
-  cfg = config.services.nixmail.inboundBridge;
+  cfg = config.nixmail.inboundBridge;
   bridgeScript = ./inbound-bridge/bridge.py;
 in
 {
-  options.services.nixmail.inboundBridge = {
+  options.nixmail.inboundBridge = {
     enable = lib.mkEnableOption "the inbound HTTP -> LMTP mail bridge (hands HTTP-POSTed raw messages to a local LMTP listener)";
 
     listenHost = lib.mkOption {
@@ -199,7 +199,7 @@ in
         # check; this assertion just surfaces the same decision earlier).
         assertion = cfg.secretFile != null || cfg.allowUnauthenticated;
         message = ''
-          services.nixmail.inboundBridge.secretFile is not set and
+          nixmail.inboundBridge.secretFile is not set and
           allowUnauthenticated is false. Either provide secretFile (an
           EnvironmentFile with INBOUND_BRIDGE_SECRET=<token>), or set
           allowUnauthenticated = true if you have deliberately decided

@@ -83,7 +83,7 @@
 with lib;
 
 let
-  cfg = config.services.nixmail.outboundBridge;
+  cfg = config.nixmail.outboundBridge;
 
   bridge = ./outbound-bridge/bridge.py;
 
@@ -102,7 +102,7 @@ let
   effectiveAllowedClients = unique (cfg.allowedClients ++ [ cfg.bindHost ]);
 in
 {
-  options.services.nixmail.outboundBridge = {
+  options.nixmail.outboundBridge = {
     enable = mkEnableOption ''
       the outbound SMTP-to-HTTP-API bridge: accepts mail from your mail
       server over local SMTP and re-sends it through one or more
@@ -371,7 +371,7 @@ in
       {
         assertion = !(elem cfg.bindHost [ "0.0.0.0" "::" ]);
         message = ''
-          services.nixmail.outboundBridge.bindHost must not be a
+          nixmail.outboundBridge.bindHost must not be a
           wildcard/any-interface address ("0.0.0.0" or "::"). See that
           option's own description and this file's header comment: this
           bridge has no authentication beyond `allowedClients`, and
@@ -393,7 +393,7 @@ in
       {
         assertion = cfg.relayChain == null || (length cfg.relayChain == length (unique cfg.relayChain));
         message = ''
-          services.nixmail.outboundBridge.relayChain lists the same relay
+          nixmail.outboundBridge.relayChain lists the same relay
           more than once. A relay is only ever tried once per message
           regardless (the chain-walking loop returns on first success), so
           a duplicate entry is always dead weight -- remove it rather than

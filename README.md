@@ -13,7 +13,7 @@ modules get an evaluation check. `nix flake check` runs three things:
 |---|---|
 | `inbound-bridge-tests` | 15 tests over the HTTP→LMTP bridge: the 4xx→421 / 5xx→550 status mapping, one LMTP transaction per recipient, partial success counting as success, an exception surfacing as retryable rather than a drop, and refusing to start unauthenticated |
 | `outbound-bridge-tests` | 21 tests over the SMTP→HTTP bridge: the allow-list defaulting to loopback, at most one relay per message, total failure deferring instead of bouncing, and envelope recipients winning over header recipients |
-| `modules-evaluate` | all four modules composed into one NixOS system, which is what catches a collision in the shared `services.nixmail.*` namespace |
+| `modules-evaluate` | all four modules composed into one NixOS system, which is what catches a collision in the shared `nixmail.*` namespace |
 
 Both suites are stdlib `unittest`, run offline, and send no mail.
 
@@ -45,7 +45,7 @@ nixmail covers mail transport, webmail, and the two delivery bridges
 ONLY. **Identity — an LDAP directory and OIDC/SSO — is explicitly out of
 scope** and lives in a separate identity project. Nothing in this repo
 ships, bundles, or requires a specific directory implementation:
-Stalwart's `services.nixmail.stalwart.ldap.*` options (`url`, `baseDn`,
+Stalwart's `nixmail.stalwart.ldap.*` options (`url`, `baseDn`,
 `bindDn`, `bindPasswordFile`, the search filters, the attribute
 mappings) stand entirely on their own, so any LDAP-speaking directory
 can back it — one from a separate identity project, or an unrelated
@@ -88,10 +88,10 @@ engine with pluggable transports).
 
 | `nixosModules.<name>` | Option namespace | Wraps | Notes |
 |---|---|---|---|
-| `stalwart` | `services.nixmail.stalwart` | Stalwart 0.16.x (own module, not nixpkgs' `services.stalwart`, which still targets Stalwart's abandoned 0.15 TOML config shape) | Renders Stalwart's post-0.15 registry-object config (domains, listeners, an LDAP directory client, TLS, MTA routing, CORS, webui, spam rules) as an NDJSON apply-plan applied once via `stalwart-cli`. The `ldap.*` options describe a directory *client* only — url, base DN, bind DN, bind-password file, search filters, attribute mappings — with no directory server bundled or assumed; point them at any LDAP-speaking directory (see "Scope" above). **Create-only, bootstrap-only — not a reconciler**: re-applying to an already-configured database is refused, not merged. Changing options after first boot does not reach a live server; reconcile by hand with `stalwart-cli`. DKIM is out of scope (manual step). `domains` is a real `attrsOf` submodule — every configured domain's `catchAll`/`subAddressing` reaches the rendered plan, checked directly in the eval test. |
-| `bulwark` | `services.nixmail.bulwark` | [Bulwark](https://github.com/bulwark-app) webmail (JMAP client, shipped upstream only as an OCI image) | Runs it as a rootless podman container. Bakes the OCI image into the Nix store at *build* time (`dockerTools.pullImage`) instead of pulling at runtime — the generalizable fix for any IPv4-only registry being unreachable from an IPv6-only host. Documents the JMAP-session-returns-absolute-URLs trap that silently breaks attachments/EventSource behind a loopback backend URL. |
-| `outbound-bridge` | `services.nixmail.outboundBridge` | in-repo (`outbound-bridge/bridge.py`, aiosmtpd) | No upstream equivalent exists — providers ship client libraries, not an SMTP-shaped protocol translator. `bindHost` is always itself permitted to relay, unconditionally, on top of whatever `allowedClients` adds — without that, setting `bindHost` to the host's own non-loopback address (as its own docs tell you to, when the mail server's anti-SSRF guard rejects a loopback relay target) while leaving `allowedClients` at its loopback-only default rejected every relay attempt. `bindHost` is hard-asserted non-wildcard (aiosmtpd's `Controller` takes exactly one bind address — "bind everywhere" replaces, not adds to, the loopback exposure). |
-| `inbound-bridge` | `services.nixmail.inboundBridge` | in-repo (`inbound-bridge/bridge.py`, stdlib `http.server` + `smtplib`) | Deliberately dumb: no parsing, no Sieve, no alias resolution — all of that stays the mail server's job. Refuses to start with no secret configured unless `allowUnauthenticated` is explicitly set (a real gap in the deployment this was extracted from: an empty secret used to just log a warning and run open). Only ever declares soft (`after`) ordering on the mail server's unit, never `requires` — the relationship is a live, retried network call, not a boot-order dependency. |
+| `stalwart` | `nixmail.stalwart` | Stalwart 0.16.x (own module, not nixpkgs' `services.stalwart`, which still targets Stalwart's abandoned 0.15 TOML config shape) | Renders Stalwart's post-0.15 registry-object config (domains, listeners, an LDAP directory client, TLS, MTA routing, CORS, webui, spam rules) as an NDJSON apply-plan applied once via `stalwart-cli`. The `ldap.*` options describe a directory *client* only — url, base DN, bind DN, bind-password file, search filters, attribute mappings — with no directory server bundled or assumed; point them at any LDAP-speaking directory (see "Scope" above). **Create-only, bootstrap-only — not a reconciler**: re-applying to an already-configured database is refused, not merged. Changing options after first boot does not reach a live server; reconcile by hand with `stalwart-cli`. DKIM is out of scope (manual step). `domains` is a real `attrsOf` submodule — every configured domain's `catchAll`/`subAddressing` reaches the rendered plan, checked directly in the eval test. |
+| `bulwark` | `nixmail.bulwark` | [Bulwark](https://github.com/bulwark-app) webmail (JMAP client, shipped upstream only as an OCI image) | Runs it as a rootless podman container. Bakes the OCI image into the Nix store at *build* time (`dockerTools.pullImage`) instead of pulling at runtime — the generalizable fix for any IPv4-only registry being unreachable from an IPv6-only host. Documents the JMAP-session-returns-absolute-URLs trap that silently breaks attachments/EventSource behind a loopback backend URL. |
+| `outbound-bridge` | `nixmail.outboundBridge` | in-repo (`outbound-bridge/bridge.py`, aiosmtpd) | No upstream equivalent exists — providers ship client libraries, not an SMTP-shaped protocol translator. `bindHost` is always itself permitted to relay, unconditionally, on top of whatever `allowedClients` adds — without that, setting `bindHost` to the host's own non-loopback address (as its own docs tell you to, when the mail server's anti-SSRF guard rejects a loopback relay target) while leaving `allowedClients` at its loopback-only default rejected every relay attempt. `bindHost` is hard-asserted non-wildcard (aiosmtpd's `Controller` takes exactly one bind address — "bind everywhere" replaces, not adds to, the loopback exposure). |
+| `inbound-bridge` | `nixmail.inboundBridge` | in-repo (`inbound-bridge/bridge.py`, stdlib `http.server` + `smtplib`) | Deliberately dumb: no parsing, no Sieve, no alias resolution — all of that stays the mail server's job. Refuses to start with no secret configured unless `allowUnauthenticated` is explicitly set (a real gap in the deployment this was extracted from: an empty secret used to just log a warning and run open). Only ever declares soft (`after`) ordering on the mail server's unit, never `requires` — the relationship is a live, retried network call, not a boot-order dependency. |
 
 Every module accepts secrets exclusively as `*File`/`*EnvFile` options
 (an `EnvironmentFile` or a plain path) — none of them assume any
@@ -133,7 +133,7 @@ account identifier; every example in this README uses `example.org` /
   # Bring your own LDAP directory -- this repo does not ship one (see
   # "Scope" above). `ldap.*` below just needs a directory that already
   # exists and answers on this URL/baseDn with a bind account it can use.
-  services.nixmail.stalwart = {
+  nixmail.stalwart = {
     enable = true;
     domains."example.org" = { };
     defaultDomain = "example.org";
@@ -153,17 +153,17 @@ account identifier; every example in this README uses `example.org` /
     };
   };
 
-  services.nixmail.outboundBridge = {
+  nixmail.outboundBridge = {
     enable = true;
     keysEnvFile = "/run/secrets/relay-keys";   # BREVO_API_KEY=... etc.
   };
 
-  services.nixmail.inboundBridge = {
+  nixmail.inboundBridge = {
     enable = true;
     secretFile = "/run/secrets/inbound-shared-secret";
   };
 
-  services.nixmail.bulwark = {
+  nixmail.bulwark = {
     enable = true;
     jmapServerUrl = "https://mail.example.org";
     stateDir = "/var/lib/bulwark";

@@ -29,7 +29,7 @@
 # applies the plan exactly once, to an empty database, and thereafter
 # refuses to touch a database that already has the plan's domains in it
 # (see the "SAFETY GUARD" comment on the unit itself for the concrete
-# incident this prevents). Changing `services.nixmail.stalwart.*` options
+# incident this prevents). Changing `nixmail.stalwart.*` options
 # on an ALREADY-BOOTSTRAPPED system does NOT reach the live server -- you
 # must reconcile the running database by hand with `stalwart-cli`
 # (get/query/update/create/destroy/describe/apply --dry-run). Building an
@@ -56,7 +56,7 @@
 with lib;
 
 let
-  cfg = config.services.nixmail.stalwart;
+  cfg = config.nixmail.stalwart;
 
   # Only domains with `enable = true` ever reach the rendered plan -- see
   # the `domains.<name>.enable` option doc for why "disabled" and "not yet
@@ -503,7 +503,7 @@ let
   };
 in
 {
-  options.services.nixmail.stalwart = {
+  options.nixmail.stalwart = {
     enable = mkEnableOption "Stalwart Mail Server (0.16.x; JMAP + IMAP + SMTP submission, registry-configured)";
 
     package = mkPackageOption pkgs "stalwart_0_16" {
@@ -1083,8 +1083,8 @@ in
       {
         assertion = hasAttr cfg.defaultDomain cfg.domains;
         message = ''
-          services.nixmail.stalwart.defaultDomain ("${cfg.defaultDomain}")
-          must be a key present in services.nixmail.stalwart.domains --
+          nixmail.stalwart.defaultDomain ("${cfg.defaultDomain}")
+          must be a key present in nixmail.stalwart.domains --
           SystemSettings.defaultDomainId is rendered as a #localId
           reference to that exact entry and would otherwise dangle.
         '';
@@ -1092,14 +1092,14 @@ in
       {
         assertion = !(cfg.acme.enable && (cfg.tls.certificateFile != null || cfg.tls.keyFile != null));
         message = ''
-          services.nixmail.stalwart.acme.enable and .tls.certificateFile/
+          nixmail.stalwart.acme.enable and .tls.certificateFile/
           keyFile are mutually exclusive certificate sources -- pick one.
         '';
       }
       {
         assertion = !cfg.publicListeners.enable || certPaths != null;
         message = ''
-          services.nixmail.stalwart.publicListeners.enable requires a
+          nixmail.stalwart.publicListeners.enable requires a
           certificate source: set either .acme.enable (with .acme.email and
           .acme.hostname) or both .tls.certificateFile and .tls.keyFile.
           Without one, the public TLS listeners would have no certificate
@@ -1109,7 +1109,7 @@ in
       {
         assertion = !cfg.bootstrap.enable || cfg.recoveryAdmin.enable;
         message = ''
-          services.nixmail.stalwart.bootstrap.enable requires
+          nixmail.stalwart.bootstrap.enable requires
           .recoveryAdmin.enable -- the bootstrap unit authenticates to the
           management API using the recovery-admin credential, since a
           freshly-created database has no LDAP-backed admin yet for it to
@@ -1119,7 +1119,7 @@ in
       {
         assertion = hasPrefix "/var/lib/" (toString cfg.stateDir);
         message = ''
-          services.nixmail.stalwart.stateDir ("${toString cfg.stateDir}")
+          nixmail.stalwart.stateDir ("${toString cfg.stateDir}")
           must live under /var/lib/ -- it is realized via systemd's
           StateDirectory=, which only ever creates directories there.
         '';

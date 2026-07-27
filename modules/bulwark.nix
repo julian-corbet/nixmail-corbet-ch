@@ -77,7 +77,7 @@
 }:
 
 let
-  cfg = config.services.nixmail.bulwark;
+  cfg = config.nixmail.bulwark;
 
   # The image `pullImage` bakes when `imageFile` is left at its default.
   # Built lazily -- if you set `imageFile = null` to opt out of the bake
@@ -98,7 +98,7 @@ let
   };
 in
 {
-  options.services.nixmail.bulwark = {
+  options.nixmail.bulwark = {
     enable = lib.mkEnableOption ''
       Bulwark, a self-hosted JMAP webmail client (Next.js standalone), run
       as a rootless-podman OCI container. Talks JMAP to any RFC 8620/8621
