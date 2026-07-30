@@ -395,7 +395,7 @@ in
         This exists because the deployment this module was extracted from
         hardcoded exactly one such unit (its own bespoke secrets-delivery
         mechanism) directly into `after`/`requires`, which only made sense
-        for that one fleet. The underlying failure mode this guards
+        for that one deployment. The underlying failure mode this guards
         against is universal, though: without SOME ordering guarantee,
         podman starts up fine and reads `environmentFile` whether or not
         it has actually been written yet by whatever process is supposed

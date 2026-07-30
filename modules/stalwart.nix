@@ -61,7 +61,7 @@ let
   # ── nixid.posix: read defensively ───────────────────────────────────────
   # nixmail references nixid nowhere else in this repo -- this is the one
   # place a name this module already owns (`user`/`group`) gets resolved
-  # against the fleet-wide identity table nixid.posix.identities/.groups
+  # against the cross-host identity table nixid.posix.identities/.groups
   # keeps, mirroring the precedent nixstorage/modules/reconciler.nix set for
   # reading that exact same table (which itself reads nixid this same way).
   # `config.nixid.posix.… or { }` degrades to an empty attrset -- not an
@@ -79,7 +79,7 @@ let
   # numerically equal to that identity's own uid.
   identGid = ident: if ident.gid == null then ident.uid else ident.gid;
 
-  # `user` is ALREADY the name this identity is known by fleet-wide -- no
+  # `user` is ALREADY the name this identity is known by across every host -- no
   # new "which identity" option to add here, unlike nixboot's
   # `esp.fromLayout` (which needed one because a single nixstorage host can
   # describe several media at once with no way to guess which one is
@@ -91,7 +91,7 @@ let
 
   # A group NAME can resolve two different ways in nixid's own model (see
   # nixstorage/modules/reconciler.nix's `resolveOwnerGid`, the fuller,
-  # non-defaulting form of this same lookup): a fleet-wide SHARED group
+  # non-defaulting form of this same lookup): a cross-host SHARED group
   # (nixid.posix.groups, meant to be joined by more than one identity), or
   # one identity's own resolved primary gid (nixid.posix.identities.<name>,
   # UPG-resolved). Check the shared-group table first -- it exists
@@ -1133,7 +1133,7 @@ in
           The unit FAILS (non-zero exit) rather than notifying, deliberately:
           this module has no opinion on how you alert. A failed systemd unit
           is the lowest common denominator every monitoring system already
-          understands -- scrape `systemctl --failed`, let your fleet monitor
+          understands -- scrape `systemctl --failed`, let your own monitoring
           catch it, or add an `OnFailure=` of your own.
         '';
       };

@@ -105,7 +105,7 @@ in
         `Authorization: Bearer <token>`. Deliberately just a path: this
         module has no opinion on how the file got there (sops-nix, a
         cloud provider's instance metadata, anything else) -- provision it
-        with whatever secrets mechanism your fleet already uses and point
+        with whatever secrets mechanism your deployment already uses and point
         this at the result. Read by systemd as root before the service
         drops privilege (`DynamicUser`), so the token is never embedded in
         the unit itself or readable by the service's own unprivileged
