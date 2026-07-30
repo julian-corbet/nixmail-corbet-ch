@@ -167,16 +167,54 @@ let
   # `offlineResources.*` lets a consumer on a fully dual-stack host set
   # these to `null` instead and let Stalwart fetch normally at its own
   # runtime.
-  webuiUpstreamUrl = "https://github.com/stalwartlabs/webui/releases/download/v1.0.4/webui.zip";
-  spamRulesUpstreamUrl = "https://github.com/stalwartlabs/spam-filter/releases/download/v3.0.0/spam-filter-rules.json.gz";
+  #
+  # Each pin is one record (URL + hash), not two facts spread across the
+  # file: previously the URL lived here, the hash lived a few lines below
+  # it, and a version bump meant editing both by hand with nothing checking
+  # they still describe the same release. `version` below is DERIVED from
+  # the URL (every upstream release URL embeds it as `/vX.Y.Z/`) rather than
+  # a third hand-typed copy of the same fact -- a URL bumped without also
+  # updating a separately-maintained version string is exactly the kind of
+  # drift this module's own outbound-bridge sibling documents elsewhere.
+  #
+  # Exposed below as read-only `offlineResources.webuiSource` /
+  # `...spamFilterRulesSource` options (url, hash, version) specifically so
+  # a supply-chain audit can read what this deployment is pinned to via
+  # `nix eval`, instead of having to open this file -- pinned upstream
+  # asset versions are exactly the kind of fact an auditor asks about, not
+  # one they merely read once and move on from.
+  versionFromReleaseUrl = url:
+    let m = builtins.match ".*/v([0-9][0-9.]*)/.*" url;
+    in
+    if m == null then
+      throw "nixmail stalwart: could not extract a /vX.Y.Z/ version segment from release URL: ${url}"
+    else
+      elemAt m 0;
 
-  webuiZipFOD = pkgs.fetchurl {
-    url = webuiUpstreamUrl;
+  mkPinnedSource = { url, hash }: {
+    inherit url hash;
+    version = versionFromReleaseUrl url;
+  };
+
+  webuiSource = mkPinnedSource {
+    url = "https://github.com/stalwartlabs/webui/releases/download/v1.0.4/webui.zip";
     hash = "sha256-pT2uAazbpMvl+cthzN/EErZiSYHFy+ATJo3S/RCYUHg=";
   };
-  spamRulesFOD = pkgs.fetchurl {
-    url = spamRulesUpstreamUrl;
+  spamRulesSource = mkPinnedSource {
+    url = "https://github.com/stalwartlabs/spam-filter/releases/download/v3.0.0/spam-filter-rules.json.gz";
     hash = "sha256-xObN2h5oG2HtWWFuOJSp8rv/jJT8ugFCfDC1sLMP7vo=";
+  };
+
+  webuiUpstreamUrl = webuiSource.url;
+  spamRulesUpstreamUrl = spamRulesSource.url;
+
+  webuiZipFOD = pkgs.fetchurl {
+    url = webuiSource.url;
+    hash = webuiSource.hash;
+  };
+  spamRulesFOD = pkgs.fetchurl {
+    url = spamRulesSource.url;
+    hash = spamRulesSource.hash;
   };
 
   # ── on-disk config.json: 0.16 = a single DataStore object, nothing else.
@@ -993,6 +1031,22 @@ in
           the one this module happens to pin.
         '';
       };
+      webuiSource = mkOption {
+        type = types.attrsOf types.str;
+        readOnly = true;
+        default = webuiSource;
+        description = ''
+          What `offlineResources.webui`'s default is actually pinned to:
+          `{ url, hash, version }` of the upstream webui release this
+          module fetches at build time. Read-only and purely informational
+          -- exists so a supply-chain audit can read the pinned
+          version/URL/hash via `nix eval` without opening this module's
+          source, which is otherwise the only place that fact is visible.
+          Changing the pin means editing the `webuiSource` binding in this
+          file's `let` block (which also changes what `webui` builds), not
+          this option.
+        '';
+      };
       webuiUrlPrefixes = mkOption {
         type = types.listOf types.str;
         default = [ "/admin" "/account" ];
@@ -1002,6 +1056,17 @@ in
         type = types.nullOr types.path;
         default = spamRulesFOD;
         description = "Store path of the spam-filter ruleset asset. Same offline/online trade-off as `webui` above.";
+      };
+      spamFilterRulesSource = mkOption {
+        type = types.attrsOf types.str;
+        readOnly = true;
+        default = spamRulesSource;
+        description = ''
+          What `offlineResources.spamFilterRules`'s default is actually
+          pinned to: `{ url, hash, version }` of the upstream spam-filter
+          ruleset release. Same read-only, audit-facing purpose as
+          `webuiSource` above.
+        '';
       };
     };
 

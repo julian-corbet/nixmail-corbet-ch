@@ -66,14 +66,15 @@
 #      failed secrets fetch is an ordinary retry rather than a silent
 #      partial start.
 #
-# The base failover order (brevo -> resend -> mailersend -> smtp2go, with a
-# configurable relay preferred for Microsoft-hosted recipients) is a real
-# operational decision, not an arbitrary list -- see `relayChain`'s doc
-# comment and bridge.py's own DEFAULT_CHAIN_ORDER comment for why it is
-# deliberately declared in exactly one place instead of being re-described
-# in this file's prose (that duplication is exactly what went stale here
-# once already: the prose fell out of sync with the code and started
-# describing a different, incomplete order).
+# The base failover order (a configurable relay preferred for Microsoft-hosted
+# recipients, then the rest) is a real operational decision, not an arbitrary
+# list -- see `relayChain`'s doc comment and bridge.py's own
+# DEFAULT_CHAIN_ORDER comment for the incident that happens when it is
+# re-described in prose instead of read from the one place it is decided: the
+# prose fell out of sync with the code and started describing a different,
+# incomplete order. This file does not restate the order either, for the same
+# reason -- `defaultRelayChain` below parses it out of bridge.py itself at
+# evaluation time, so there is nothing here to fall out of sync.
 #
 # Wraps nothing -- there is no upstream "SMTP-to-HTTP-API bridge" package.
 # The companion script lives at ./outbound-bridge/bridge.py.
@@ -88,6 +89,57 @@ let
   bridge = ./outbound-bridge/bridge.py;
 
   relayNames = [ "brevo" "resend" "mailersend" "smtp2go" "postmark" ];
+
+  # `defaultRelayChain` -- the built-in failover order used when `relayChain`
+  # is left `null` -- is PARSED OUT OF bridge.py's own DEFAULT_CHAIN_ORDER
+  # here, at evaluation time, rather than hand-copied into a second Nix
+  # literal. A hand-copy is exactly what drifted before: this order used to
+  # be re-described in this file's own prose, the prose fell out of sync with
+  # the code, and the two disagreed about something operationally
+  # load-bearing (see bridge.py's own comment on DEFAULT_CHAIN_ORDER). Reading
+  # the Python source instead of retyping its contents makes that class of
+  # drift structurally impossible: there is only one list, and this is a view
+  # onto it. Exposed below as the read-only `defaultRelayChain` option so an
+  # operator (or another module) can read the built-in order from the Nix
+  # layer -- previously the only way to know it was to open bridge.py, which
+  # is a different language from everything else that configures this
+  # bridge.
+  #
+  # No build step involved -- `builtins.readFile` + a POSIX ERE match, same
+  # as any other eval-time fact this project pulls out of a file it does not
+  # own the format of. Fails loudly (via `throw`) rather than silently
+  # falling back to `[ ]` if bridge.py is ever reformatted onto multiple
+  # lines or the constant is renamed -- a silent empty default here would
+  # mean "no relay is ever tried", which is a very unhelpful way to discover
+  # the parse broke.
+  defaultRelayChainLine =
+    let
+      bridgeSrc = builtins.readFile ./outbound-bridge/bridge.py;
+      lines = splitString "\n" bridgeSrc;
+      found = findFirst (l: hasInfix "DEFAULT_CHAIN_ORDER = [" l) null lines;
+    in
+    if found == null then
+      throw ''
+        nixmail outbound-bridge: could not find a `DEFAULT_CHAIN_ORDER = [...]`
+        line in bridge.py. Either it was renamed, or it now spans multiple
+        lines -- update the parser in this module's `let` block (search for
+        `defaultRelayChainLine`) to match.
+      ''
+    else found;
+
+  defaultRelayChain =
+    let
+      m = builtins.match ".*[[](.*)[]].*" defaultRelayChainLine;
+      inner = elemAt m 0;
+      parseEntry = s:
+        let m2 = builtins.match ''[[:space:]]*"([a-zA-Z0-9_]*)"[[:space:]]*'' s;
+        in
+        if m2 == null then
+          throw "nixmail outbound-bridge: unparseable DEFAULT_CHAIN_ORDER entry '${s}' in bridge.py"
+        else
+          elemAt m2 0;
+    in
+    map parseEntry (splitString "," inner);
 
   # ---------------------------------------------------------------------
   # `bindInterface`'s resolution -- read-only, defensive lookup into
@@ -322,16 +374,39 @@ in
         Explicit, ordered override of the failover chain. Only providers
         with a configured key in `keysEnvFile` are actually used, skipping
         the rest, in the order given here. Leave `null` to use the
-        built-in default order (brevo, resend, mailersend, smtp2go) baked
-        into bridge.py's own `DEFAULT_CHAIN_ORDER` -- that default
+        built-in default order (currently: ${concatStringsSep ", " defaultRelayChain})
+        baked into bridge.py's own `DEFAULT_CHAIN_ORDER` -- see
+        `defaultRelayChain` below to read that order from the Nix layer
+        directly instead of trusting this description string, which is
+        regenerated from the same source but is still prose. That default
         previously lived ONLY as a hardcoded sequence of
-        `if KEY: chain.append(...)` calls, separately re-described in this
-        module's own prose, and the two silently drifted apart (the prose
-        fell out of date and started describing a different order that
-        also omitted two providers entirely). Setting this option
-        explicitly, or reading bridge.py's own constant, are now the only
-        two places this order is decided -- don't reintroduce a third,
-        separately-maintained description of it anywhere else.
+        `if KEY: chain.append(...)` calls, separately re-described
+        elsewhere, and the two silently drifted apart (the other
+        description fell out of date and started describing a different
+        order that also omitted two providers entirely). Setting this
+        option explicitly, or reading bridge.py's own constant via
+        `defaultRelayChain`, are now the only two places this order is
+        decided -- don't reintroduce a third, separately-maintained
+        description of it anywhere else.
+      '';
+    };
+
+    defaultRelayChain = mkOption {
+      type = types.listOf (types.enum relayNames);
+      readOnly = true;
+      description = ''
+        The built-in failover order actually used when `relayChain` is left
+        at its default (`null`) -- read out of bridge.py's own
+        `DEFAULT_CHAIN_ORDER` at evaluation time, not hand-copied, so this
+        can never disagree with what the bridge does at runtime.
+
+        Exists because that order previously lived ONLY inside bridge.py, a
+        different language from everything else that configures this
+        bridge -- invisible to the Nix layer, to `nix eval`, and to any
+        other module that might want to depend on it. An operator wanting
+        to know (or assert) the built-in order no longer needs to open
+        bridge.py: `nix eval <flake>#nixosConfigurations.<host>.config.nixmail.outboundBridge.defaultRelayChain`
+        answers it directly.
       '';
     };
 
@@ -433,7 +508,14 @@ in
     };
   };
 
-  config = mkIf cfg.enable {
+  config = mkMerge [
+    # Unconditional -- readable/assertable regardless of `enable`, same
+    # reasoning as nixarch's `effectiveKeep`: this is a fact about the
+    # module's own built-in default, not a runtime effect that only exists
+    # once the bridge is turned on.
+    { nixmail.outboundBridge.defaultRelayChain = defaultRelayChain; }
+
+    (mkIf cfg.enable {
     assertions = [
       {
         assertion = !(elem cfg.bindHost [ "0.0.0.0" "::" ]);
@@ -549,5 +631,6 @@ in
         UMask = "0077";
       };
     };
-  };
+    })
+  ];
 }
