@@ -58,23 +58,23 @@ with lib;
 let
   cfg = config.nixmail.stalwart;
 
-  # ── nixid.posix: read defensively ───────────────────────────────────────
-  # nixmail references nixid nowhere else in this repo -- this is the one
+  # ── nixiam.posix: read defensively ───────────────────────────────────────
+  # nixmail references nixiam nowhere else in this repo -- this is the one
   # place a name this module already owns (`user`/`group`) gets resolved
-  # against the cross-host identity table nixid.posix.identities/.groups
+  # against the cross-host identity table nixiam.posix.identities/.groups
   # keeps, mirroring the precedent nixstorage/modules/reconciler.nix set for
-  # reading that exact same table (which itself reads nixid this same way).
-  # `config.nixid.posix.… or { }` degrades to an empty attrset -- not an
-  # eval error -- on a host that never imported nixid's posix module at
+  # reading that exact same table (which itself reads nixiam this same way).
+  # `config.nixiam.posix.… or { }` degrades to an empty attrset -- not an
+  # eval error -- on a host that never imported nixiam's posix module at
   # all, so this module keeps evaluating, `uid`/`gid` simply unresolved,
   # exactly as it did before this table existed. nixmail never imports
-  # nixid and never will; it only reads a value if one happens to be there.
-  nsIdentities = config.nixid.posix.identities or { };
-  nsGroups = config.nixid.posix.groups or { };
+  # nixiam and never will; it only reads a value if one happens to be there.
+  nsIdentities = config.nixiam.posix.identities or { };
+  nsGroups = config.nixiam.posix.groups or { };
 
   # Duplicated rather than imported -- the same call nixstorage's reconciler
   # already made for this identical three-line function, for the same
-  # reason: mirrors nixid.posix's own private `resolvedGid` (modules/
+  # reason: mirrors nixiam.posix's own private `resolvedGid` (modules/
   # posix.nix). An unset `gid` on an identity is a User Private Group,
   # numerically equal to that identity's own uid.
   identGid = ident: if ident.gid == null then ident.uid else ident.gid;
@@ -89,11 +89,11 @@ let
   # still always wins over whatever this resolves to.
   stalwartIdentity = nsIdentities.${cfg.user} or null;
 
-  # A group NAME can resolve two different ways in nixid's own model (see
+  # A group NAME can resolve two different ways in nixiam's own model (see
   # nixstorage/modules/reconciler.nix's `resolveOwnerGid`, the fuller,
   # non-defaulting form of this same lookup): a cross-host SHARED group
-  # (nixid.posix.groups, meant to be joined by more than one identity), or
-  # one identity's own resolved primary gid (nixid.posix.identities.<name>,
+  # (nixiam.posix.groups, meant to be joined by more than one identity), or
+  # one identity's own resolved primary gid (nixiam.posix.identities.<name>,
   # UPG-resolved). Check the shared-group table first -- it exists
   # specifically for names meant to cross identities -- then fall back to
   # treating the name as an identity of its own, which covers the shape
@@ -598,18 +598,18 @@ in
     uid = mkOption {
       type = types.nullOr types.int;
       default = if stalwartIdentity != null then stalwartIdentity.uid else null;
-      defaultText = literalExpression "the uid of nixid.posix.identities.<user>, else null";
+      defaultText = literalExpression "the uid of nixiam.posix.identities.<user>, else null";
       description = ''
         Numeric uid to pin the service user to, or `null` to let NixOS
         allocate one automatically. Leave `null` on a fresh install with no
-        nixid identity declared for `user`.
+        nixiam identity declared for `user`.
 
-        Defaults from `config.nixid.posix.identities.<user>.uid` (`user`
+        Defaults from `config.nixiam.posix.identities.<user>.uid` (`user`
         being this module's own `user` option, default "stalwart-mail")
-        whenever nixid's posix module is imported alongside this one AND
+        whenever nixiam's posix module is imported alongside this one AND
         declares an identity by that exact name -- read defensively (see
-        this module's own nixid.posix read at the top of its `let` block),
-        so a host that has never heard of nixid, or simply hasn't named
+        this module's own nixiam.posix read at the top of its `let` block),
+        so a host that has never heard of nixiam, or simply hasn't named
         this identity there yet, still defaults to `null` exactly as
         before this lookup existed, and NixOS allocates one. An EXPLICIT
         value set here always wins over that default -- nothing about
@@ -618,7 +618,7 @@ in
         layout in the sibling nixboot repo doesn't stop a host from typing
         its own label.
 
-        PIN THIS EXPLICITLY -- don't lean on the nixid default -- whenever
+        PIN THIS EXPLICITLY -- don't lean on the nixiam default -- whenever
         the mail store already exists on disk owned by a specific uid:
         e.g. state that lives on a bind-mounted disk moved from another
         install, or an image rebuilt from scratch that must keep reading
@@ -630,7 +630,7 @@ in
         the first failed open, discovered (if ever) only then. If you hit
         that, pin BOTH `uid` and `gid` to whatever `stat`/`getent` reports
         the existing files are owned by, not a guessed value -- and NOT
-        whatever nixid's table happens to say today, since that table can
+        whatever nixiam's table happens to say today, since that table can
         be renumbered by someone who has never heard of this host's
         already-bootstrapped store.
       '';
@@ -638,14 +638,14 @@ in
     gid = mkOption {
       type = types.nullOr types.int;
       default = stalwartGid;
-      defaultText = literalExpression "nixid.posix.groups.<group>, else the resolved gid of nixid.posix.identities.<group>, else null";
+      defaultText = literalExpression "nixiam.posix.groups.<group>, else the resolved gid of nixiam.posix.identities.<group>, else null";
       description = ''
         Numeric gid to pin the service group to, or `null` to let NixOS
         allocate one. Defaults the same way `uid` does -- see its
-        description both for the nixid.posix lookup (`group` being this
+        description both for the nixiam.posix lookup (`group` being this
         module's own `group` option, default "stalwart-mail") and for why
         an already-bootstrapped mail store needs this pinned by hand from
-        `stat`/`getent`, never left to nixid's table, once one exists.
+        `stat`/`getent`, never left to nixiam's table, once one exists.
       '';
     };
 

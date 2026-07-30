@@ -23,7 +23,7 @@
 
     # Users live in an external LDAP directory, so its coordinates are site
     # facts the module refuses to guess. Identity is out of scope for this
-    # repository — see the sibling nixid project for the directory itself.
+    # repository — see the sibling nixiam project for the directory itself.
     ldap = {
       baseDn = "dc=example,dc=com";
       bindPasswordFile = "/run/secrets/example-ldap-bind";

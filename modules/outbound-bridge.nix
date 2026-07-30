@@ -89,6 +89,29 @@ let
 
   relayNames = [ "brevo" "resend" "mailersend" "smtp2go" "postmark" ];
 
+  # ---------------------------------------------------------------------
+  # `bindInterface`'s resolution -- read-only, defensive lookup into
+  # `config.nixhost.resources.net`, never a flake input on
+  # github:julian-corbet/nixhost-corbet-ch (see that option's own
+  # description). Guarded at every hop rather than a single trailing `or`:
+  # `netTable.${cfg.bindInterface} or null` and
+  # `ifaceEntry.addresses.${cfg.bindInterfaceRole} or null` each stand alone
+  # so a missing `nixhost` import, a misspelled interface name, and a
+  # missing role all fall through to `null` (caught by the assertion below)
+  # instead of an eval-time "attribute missing" thrown from some OTHER
+  # module's code far away from this one -- same idiom nixshare's own
+  # `providerEnabled` comment documents for exactly this trap.
+  # ---------------------------------------------------------------------
+  resolvedBindAddress =
+    if cfg.bindInterface == null then null
+    else
+      let
+        netTable = config.nixhost.resources.net or { };
+        ifaceEntry = netTable.${cfg.bindInterface} or null;
+      in
+      if ifaceEntry == null then null
+      else ifaceEntry.addresses.${cfg.bindInterfaceRole} or null;
+
   # `bindHost` is ALWAYS itself permitted to relay, unconditionally, on top
   # of whatever `allowedClients` adds -- see the option docs on both for
   # why. Without this derivation, following this module's own `bindHost`
@@ -172,6 +195,50 @@ in
         reachable in the first place, no firewall rule required. See this
         file's header comment for the production incident that motivated
         the hard assertion on this below.
+      '';
+    };
+
+    bindInterface = mkOption {
+      type = types.nullOr types.str;
+      default = null;
+      example = "lan0";
+      description = ''
+        Read `bindHost` from this host's own
+        `nixhost.resources.net.<bindInterface>.addresses.<bindInterfaceRole>`
+        (see `bindInterfaceRole` below for the second half of that path)
+        instead of hand-typing the literal address a second time here -- the
+        same "box's own real, stable, non-loopback address" fact `bindHost`'s
+        own description asks for, addressed through this host's own `nixhost`
+        self-description (see github:julian-corbet/nixhost-corbet-ch) rather
+        than copy-pasted.
+
+        `null` (the default) is a complete no-op: `bindHost` keeps its own
+        `"127.0.0.1"` default (or whatever you set it to directly) and this
+        module never looks at `config.nixhost` at all -- it has no flake
+        input on nixhost and no hard dependency on it being imported.
+
+        When set, and only then, resolving successfully OVERRIDES `bindHost`'s
+        OWN default (at `mkDefault` priority) -- an explicit `bindHost = "...";`
+        elsewhere in your config still wins outright, this only replaces the
+        `"127.0.0.1"` fallback. Resolving and finding nothing (nixhost not
+        imported on this host, no interface by this name, or no
+        `bindInterfaceRole` entry on it) is a hard eval error via the
+        assertion below, never a silent fall-back to the loopback default --
+        this option exists specifically because loopback is the ONE value
+        this module's own docs say is wrong for the anti-SSRF case, so
+        silently landing back on it here would be exactly backwards.
+      '';
+    };
+
+    bindInterfaceRole = mkOption {
+      type = types.str;
+      default = "lan";
+      example = "overlay";
+      description = ''
+        Which key of `nixhost.resources.net.<bindInterface>.addresses` to
+        read (that table is itself keyed by role, e.g. `lan`/`overlay` --
+        see nixhost's own `resources.net` for the open-ended set). Ignored
+        entirely when `bindInterface` is `null`.
       '';
     };
 
@@ -400,7 +467,31 @@ in
           let it imply a retry that will never actually happen.
         '';
       }
+      {
+        assertion = cfg.bindInterface == null || resolvedBindAddress != null;
+        message = ''
+          nixmail.outboundBridge.bindInterface = "${toString cfg.bindInterface}"
+          did not resolve to an address at
+          nixhost.resources.net."${toString cfg.bindInterface}".addresses."${cfg.bindInterfaceRole}"
+          -- either this host does not import nixhost at all, its
+          `resources.net` has no interface by that name, or that interface's
+          `addresses` has no "${cfg.bindInterfaceRole}" entry. `bindHost`
+          deliberately was NOT left to fall back to its own "127.0.0.1"
+          default here: that is the one value this module's own docs say is
+          wrong for the anti-SSRF case `bindInterface` exists to serve, so
+          silently landing on it would be exactly backwards. Fix the
+          interface/role, or set `bindHost` directly and drop
+          `bindInterface`.
+        '';
+      }
     ];
+
+    # Opt-in only (see `bindInterface`'s own description): a no-op unless
+    # `bindInterface` is set AND resolves. `mkDefault` so an explicit
+    # `bindHost = "...";` anywhere else in a consumer's own config still
+    # wins outright -- this only replaces the bare `"127.0.0.1"` the option
+    # itself defaults to.
+    nixmail.outboundBridge.bindHost = mkIf (resolvedBindAddress != null) (mkDefault resolvedBindAddress);
 
     systemd.services.outbound-bridge = {
       description = "Outbound SMTP-to-HTTP-API mail bridge";
