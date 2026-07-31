@@ -27,11 +27,6 @@ bind address to `0.0.0.0`. Both are proven in the failing direction — widen th
 default and two tests fail, one of them by observing a rejected client reach the
 relay chain.
 
-An earlier version of this section claimed a `nix flake check` pass and a
-standalone `evalModules` composition test at a time when the flake had no
-`checks` output at all. That has been replaced by the table above rather than
-quietly corrected.
-
 Still stronger than any of it: all four modules run in a real production
 deployment (a small single-node host, outside this repo), and outbound and
 inbound mail have both been proven end to end with real messages through it.

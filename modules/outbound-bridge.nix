@@ -531,14 +531,10 @@ in
           this service from.
         '';
       }
-      # There used to be an assertion here rejecting an empty
-      # `allowedClients`. It no longer applies: `bindHost` is now always
-      # folded into the effective allowlist (`effectiveAllowedClients`
-      # above), so the "nothing can ever relay through this bridge" failure
-      # mode that assertion existed to catch is now structurally
-      # impossible -- `bindHost` is a required, always-non-empty address,
-      # so the effective list sent to bridge.py can never be empty even
-      # when `allowedClients` itself is deliberately set to `[ ]`.
+      # No assertion here rejects an empty `allowedClients`: `bindHost` is always folded into the
+      # effective allowlist (`effectiveAllowedClients` above), and `bindHost` is a required,
+      # always-non-empty address -- so the effective list sent to bridge.py can never be empty,
+      # even when `allowedClients` itself is deliberately set to `[ ]`.
       {
         assertion = cfg.relayChain == null || (length cfg.relayChain == length (unique cfg.relayChain));
         message = ''
