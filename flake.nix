@@ -3,9 +3,25 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+
+    # For exactly one thing: `lib.probeFact`/`lib.collectProbes` (github:julian-corbet/
+    # nixhost-corbet-ch, `lib/facts.nix`) -- the shared, plain-function fix for the
+    # cross-namespace defensive-read defect class (a bare `config.nixfoo.bar or fallback`
+    # cannot tell "nixfoo not composed here" from "nixfoo composed but `bar`
+    # moved/renamed/rejected" -- see nixhost's own `lib/facts.nix` header). `stalwart.nix`'s own
+    # `config.nixiam.posix.identities`/`.groups` read is exactly this shape, so it takes
+    # `probeFact`/`collectProbes` closed over as plain function arguments (below), never
+    # `_module.args` -- the same partially-applied-before-the-module-system-sees-it pattern this
+    # family already uses for `nixfsCatalogue` (see infra's own flake.nix comment on `mkNixnas`
+    # for that precedent) -- so a consumer importing `nixosModules.stalwart` sees an ordinary
+    # module function and never needs to know `probeFact` exists.
+    nixhost = {
+      url = "github:julian-corbet/nixhost-corbet-ch";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
-  outputs = { self, nixpkgs }:
+  outputs = { self, nixpkgs, nixhost }:
     let
       lib = nixpkgs.lib;
       supportedSystems = [ "x86_64-linux" "aarch64-linux" ];
@@ -24,7 +40,10 @@
       # for why (a fake generic interface with exactly one implementation
       # behind it documents a boundary that doesn't exist).
       # ---------------------------------------------------------------
-      nixosModules.stalwart = ./modules/stalwart.nix;
+      # `probeFact`/`collectProbes` closed over here, before the module system ever sees the
+      # result -- see the input comment above. The exported value is a plain module function
+      # taking the usual `{ config, lib, pkgs, ... }`; nothing about consuming it changes.
+      nixosModules.stalwart = import ./modules/stalwart.nix { inherit (nixhost.lib) probeFact collectProbes; };
       nixosModules.bulwark = ./modules/bulwark.nix;
       nixosModules."outbound-bridge" = ./modules/outbound-bridge.nix;
       nixosModules."inbound-bridge" = ./modules/inbound-bridge.nix;

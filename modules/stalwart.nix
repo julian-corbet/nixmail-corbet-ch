@@ -51,6 +51,7 @@
 # a fresh database and asserts the plan applies cleanly is the right
 # long-term fix and does not exist here yet.
 
+{ probeFact, collectProbes }:
 { config, lib, pkgs, ... }:
 
 with lib;
@@ -58,19 +59,40 @@ with lib;
 let
   cfg = config.nixmail.stalwart;
 
-  # ── nixiam.posix: read defensively ───────────────────────────────────────
+  # ── nixiam.posix: read through `lib.probeFact` ────────────────────────────
   # nixmail references nixiam nowhere else in this repo -- this is the one
   # place a name this module already owns (`user`/`group`) gets resolved
   # against the cross-host identity table nixiam.posix.identities/.groups
   # keeps, mirroring the precedent nixstorage/modules/reconciler.nix set for
   # reading that exact same table (which itself reads nixiam this same way).
-  # `config.nixiam.posix.… or { }` degrades to an empty attrset -- not an
-  # eval error -- on a host that never imported nixiam's posix module at
-  # all, so this module keeps evaluating, `uid`/`gid` simply unresolved,
-  # exactly as it did before this table existed. nixmail never imports
-  # nixiam and never will; it only reads a value if one happens to be there.
-  nsIdentities = config.nixiam.posix.identities or { };
-  nsGroups = config.nixiam.posix.groups or { };
+  #
+  # A bare `config.nixiam.posix.… or { }` degrades to an empty attrset both
+  # when a host never imported nixiam's posix module at all (legitimate,
+  # silent) AND when it did but `identities`/`groups` moved, was renamed, or
+  # was rejected by its own type (a defect, silently indistinguishable from
+  # the first case with a bare `or`) -- see nixhost's own `lib/facts.nix`
+  # header (github:julian-corbet/nixhost-corbet-ch) for the full defect class
+  # this family lost real weeks to elsewhere. `probeFact` tells the two
+  # apart: `nsIdentities`/`nsGroups` still resolve to `{ }` either way (this
+  # module keeps evaluating, `uid`/`gid` simply unresolved, exactly as
+  # before), but `identitiesProbe.warnings`/`groupsProbe.warnings` (spliced
+  # into `config.warnings` below) render ONLY for the composed-but-broken
+  # case. nixmail never imports nixiam and never will; it only reads a value
+  # if one happens to be there.
+  identitiesProbe = probeFact {
+    inherit config;
+    namespace = "nixiam";
+    path = "posix.identities";
+    fallback = { };
+  };
+  groupsProbe = probeFact {
+    inherit config;
+    namespace = "nixiam";
+    path = "posix.groups";
+    fallback = { };
+  };
+  nsIdentities = identitiesProbe.value;
+  nsGroups = groupsProbe.value;
 
   # Duplicated rather than imported -- the same call nixstorage's reconciler
   # already made for this identical three-line function, for the same
@@ -1222,6 +1244,10 @@ in
   };
 
   config = mkIf cfg.enable {
+    # nixiam.posix state (c) surfaces here, unconditionally whenever this module is enabled --
+    # see `identitiesProbe`/`groupsProbe` above for what this can and cannot tell apart.
+    warnings = (collectProbes [ identitiesProbe groupsProbe ]).warnings;
+
     assertions = [
       {
         assertion = hasAttr cfg.defaultDomain cfg.domains;
