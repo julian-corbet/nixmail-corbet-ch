@@ -71,11 +71,11 @@
         "system-manager": "system-manager"
       },
       "locked": {
-        "lastModified": 1785458421,
-        "narHash": "sha256-7vET6WFjexVVLLYm92w9Kf9Bjen5qzFHgPeiCwPzOBU=",
+        "lastModified": 1785465092,
+        "narHash": "sha256-p4X1w2Ru1xXAkgxdAfX+Hde879o86rjG/sD0rXprAmM=",
         "owner": "julian-corbet",
         "repo": "nixhost-corbet-ch",
-        "rev": "d67c5531aea8d8c969d27a2ec361f0b13767e044",
+        "rev": "50be92e4fd8367e76033aed1189b80e3683ba77a",
         "type": "github"
       },
       "original": {

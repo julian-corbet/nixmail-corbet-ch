@@ -79,16 +79,24 @@ let
   # into `config.warnings` below) render ONLY for the composed-but-broken
   # case. nixmail never imports nixiam and never will; it only reads a value
   # if one happens to be there.
+  # The OWNER is `nixiam.posix`, not `nixiam`, and the distinction is load-bearing rather than
+  # stylistic. nixiam ships lldap, pocket-id, vaultwarden, users and posix as separately-composable
+  # modules under one namespace, and a host may take some and not others -- the mail host takes
+  # lldap and pocket-id and NOT posix. Probing `nixiam` sees the namespace present (lldap declared
+  # it), finds `posix.identities` missing, and reports "the option moved or was renamed". Nothing
+  # moved; posix was simply never composed. That was live here: two warnings on every evaluation of
+  # the mail host, each pointing at a rename that does not exist. Naming the owner subtree puts the
+  # composed-test on the actual module boundary.
   identitiesProbe = probeFact {
     inherit config;
-    namespace = "nixiam";
-    path = "posix.identities";
+    namespace = "nixiam.posix";
+    path = "identities";
     fallback = { };
   };
   groupsProbe = probeFact {
     inherit config;
-    namespace = "nixiam";
-    path = "posix.groups";
+    namespace = "nixiam.posix";
+    path = "allGroups";
     fallback = { };
   };
   nsIdentities = identitiesProbe.value;
@@ -190,14 +198,12 @@ let
   # these to `null` instead and let Stalwart fetch normally at its own
   # runtime.
   #
-  # Each pin is one record (URL + hash), not two facts spread across the
-  # file: previously the URL lived here, the hash lived a few lines below
-  # it, and a version bump meant editing both by hand with nothing checking
-  # they still describe the same release. `version` below is DERIVED from
-  # the URL (every upstream release URL embeds it as `/vX.Y.Z/`) rather than
-  # a third hand-typed copy of the same fact -- a URL bumped without also
-  # updating a separately-maintained version string is exactly the kind of
-  # drift this module's own outbound-bridge sibling documents elsewhere.
+  # Each pin is one record (URL + hash), not two facts spread across the file -- a version bump
+  # would otherwise mean editing both by hand with nothing checking they still describe the same
+  # release. `version` below is DERIVED from the URL (every upstream release URL embeds it as
+  # `/vX.Y.Z/`) rather than a third hand-typed copy of the same fact -- a URL bumped without also
+  # updating a separately-maintained version string is exactly the kind of drift this module's own
+  # outbound-bridge sibling documents elsewhere.
   #
   # Exposed below as read-only `offlineResources.webuiSource` /
   # `...spamFilterRulesSource` options (url, hash, version) specifically so
