@@ -48,6 +48,14 @@
       nixosModules."outbound-bridge" = ./modules/outbound-bridge.nix;
       nixosModules."inbound-bridge" = ./modules/inbound-bridge.nix;
 
+      # The CLIENT half: tools that TALK to a mail server rather than being one (a terminal mail
+      # user agent, an IMAP-to-IMAP synchroniser). Pure option surface -- it publishes package
+      # intent and installs nothing -- so the identical file serves both planes rather than
+      # needing a system-manager-specific twin. See modules/clients.nix for the one line each
+      # plane wires, and lib/clients.nix for the catalogue and its verification.
+      nixosModules.clients = ./modules/clients.nix;
+      systemManagerModules.clients = ./modules/clients.nix;
+
       # ---------------------------------------------------------------
       # The two bridges are real programs, not configuration, so they get
       # real tests rather than an evaluation check. Both suites are stdlib
@@ -134,6 +142,44 @@
             in
             pkgs.writeText "nixmail-host-drvpath"
               (builtins.unsafeDiscardStringContext host.config.system.build.toplevel.drvPath);
+
+          # ---------------------------------------------------------------
+          # The client catalogue. Three properties, and the third is the one
+          # that matters: a selected tool nixpkgs does not package must be
+          # REPORTED rather than quietly dropped, because a host that selects
+          # a tool, evaluates cleanly and does not have it is the silent
+          # partial outcome this option surface exists to prevent.
+          # ---------------------------------------------------------------
+          clients-catalogue =
+            let
+              evalClients = tools: (lib.evalModules {
+                modules = [ ./modules/clients.nix { nixmail.clients.tools = tools; } ];
+              }).config.nixmail.clients;
+
+              none = evalClients [ ];
+              both = evalClients [ "s-nail" "imapsync" ];
+
+              ok =
+                # Nothing selected contributes nothing, on every plane.
+                none.archPackages == [ ] && none.nixosPackages == [ ]
+                && none.unavailableOnNixos == [ ]
+                # Both are official-repo pacman names, so neither may reach the AUR half -- and
+                # nothing may reach it that is not there deliberately.
+                && lib.sort (a: b: a < b) both.archPackages == [ "imapsync" "s-nail" ]
+                && both.aurPackages == [ ]
+                # nixpkgs packages exactly one of the two, and the other is NAMED rather than
+                # silently missing.
+                && both.nixosPackages == [ "imapsync" ]
+                && both.unavailableOnNixos == [ "s-nail" ];
+            in
+            if ok
+            then pkgs.runCommand "nixmail-clients-catalogue" { } "touch $out"
+            else throw ''
+              nixmail client catalogue FAILED:
+                selected both -> arch=${builtins.toJSON both.archPackages} aur=${builtins.toJSON both.aurPackages}
+                                 nixos=${builtins.toJSON both.nixosPackages} unavailable=${builtins.toJSON both.unavailableOnNixos}
+                selected none -> arch=${builtins.toJSON none.archPackages} nixos=${builtins.toJSON none.nixosPackages}
+            '';
         });
 
       formatter = forAllSystems (system: (import nixpkgs { inherit system; }).nixpkgs-fmt);
