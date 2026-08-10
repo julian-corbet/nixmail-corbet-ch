@@ -144,6 +144,89 @@
               (builtins.unsafeDiscardStringContext host.config.system.build.toplevel.drvPath);
 
           # ---------------------------------------------------------------
+          # Bulwark's memory cap, asserted on the RENDERED systemd units and
+          # the RENDERED podman command line — never on the option value.
+          #
+          # That distinction is the entire point of this check. Both defects
+          # it pins leave `nixmail.bulwark.memoryMax` and `.slice` holding
+          # exactly the values the consumer wrote, so an assertion on the
+          # options passes while the host runs uncapped:
+          #
+          #   * `memoryMax = "256m"` reaches podman's `--memory` (Docker's
+          #     RAMInBytes, case-INsensitive: accepted) and systemd's
+          #     `MemoryMax=` (case-SENSITIVE: "Invalid memory limit '256m',
+          #     ignoring"). The slice sits at infinity and nothing says so.
+          #   * `slice = "bulwark.slice"` passed through verbatim keys
+          #     `systemd.slices."bulwark.slice"`, which NixOS renders as the
+          #     unit `bulwark.slice.slice`, while `Slice=` names
+          #     `bulwark.slice` — systemd auto-vivifies that second, empty
+          #     slice and the container joins it instead.
+          #
+          # Reading the unit text is what catches both, so that is what this
+          # reads. `.text`/`.script` carry store paths as string context;
+          # they are compared, never embedded in the output, so evaluating
+          # this builds nothing but an empty file.
+          # ---------------------------------------------------------------
+          bulwark-memory-cap =
+            let
+              hostConfig = bulwark: (lib.nixosSystem {
+                inherit system;
+                modules = lib.attrValues self.nixosModules
+                  ++ [ ./examples/host/configuration.nix { nixmail.bulwark = bulwark; } ];
+              }).config;
+
+              # Both spellings a consumer might reasonably write for the same
+              # slice. They must render identically — the module normalises
+              # rather than passing the string to two grammars that disagree.
+              suffixed = hostConfig { slice = "bulwark.slice"; };
+              bare = hostConfig { slice = "bulwark"; };
+
+              unit = host: name: host.systemd.units.${name}.text or "<no unit ${name}>";
+
+              capped = host:
+                # The slice systemd will actually parse carries the cap, in
+                # the case systemd actually accepts.
+                lib.hasInfix "MemoryMax=256M" (unit host "bulwark.slice")
+                # …and the container is enrolled in THAT slice, not a
+                # differently-named one that nothing configured.
+                && lib.hasInfix "Slice=bulwark.slice" (unit host "podman-bulwark.service")
+                # …and podman's own inner cap got the identical string.
+                && lib.hasInfix "'--memory=256M'" host.systemd.services."podman-bulwark".script
+                # Nothing was renamed into an adjacent unit on the way.
+                && !(lib.hasAttr "bulwark.slice.slice" host.systemd.units);
+
+              # A size the two parsers do not agree on must be refused at
+              # evaluation, because neither parser will refuse it at runtime.
+              rejected = value:
+                lib.any (a: !a.assertion && lib.hasInfix "memoryMax" a.message)
+                  (hostConfig { memoryMax = value; }).assertions;
+
+              ok =
+                capped suffixed && capped bare
+                && rejected "256m" && rejected "256MB" && rejected "256MiB"
+                # "0" is the disagreement in the opposite direction: podman's
+                # "no limit" against systemd's "Memory limit '0' out of
+                # range, ignoring". Both end uncapped, silently, so it is
+                # refused too — `slice = null` is how you spell "no cap".
+                && rejected "0" && rejected "0M"
+                # …while the default and its neighbours stay legal.
+                && !(rejected "256M") && !(rejected "1G") && !(rejected "268435456");
+            in
+            if ok
+            then pkgs.runCommand "nixmail-bulwark-memory-cap" { } "touch $out"
+            else throw ''
+              nixmail bulwark memory cap FAILED:
+                units (slice = "bulwark.slice") -> ${builtins.toJSON (builtins.filter (lib.hasInfix "bulwark") (builtins.attrNames suffixed.systemd.units))}
+                bulwark.slice  -> ${builtins.toJSON (unit suffixed "bulwark.slice")}
+                Slice=/--memory -> ${builtins.toJSON (unit suffixed "podman-bulwark.service")}
+                                   ${builtins.toJSON suffixed.systemd.services."podman-bulwark".script}
+                bare spelling renders the same -> ${builtins.toJSON (capped bare)}
+                rejects 256m/256MB/256MiB -> ${builtins.toJSON [ (rejected "256m") (rejected "256MB") (rejected "256MiB") ]}
+                rejects 0/0M              -> ${builtins.toJSON [ (rejected "0") (rejected "0M") ]}
+                accepts 256M/1G/bytes     -> ${builtins.toJSON [ (rejected "256M") (rejected "1G") (rejected "268435456") ]}
+            '';
+
+          # ---------------------------------------------------------------
           # The client catalogue. Three properties, and the third is the one
           # that matters: a selected tool nixpkgs does not package must be
           # REPORTED rather than quietly dropped, because a host that selects

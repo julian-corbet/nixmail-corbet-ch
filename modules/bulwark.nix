@@ -11,7 +11,7 @@
 # gets its own module; whether a shared `webmail-core.nix` makes sense at
 # that point is a question for two data points, not one.
 #
-# What justifies publishing this at all is three pieces of genuinely
+# What justifies publishing this at all is four pieces of genuinely
 # transferable mechanism, none of them specific to webmail:
 #
 #   1. Baking an OCI image into the Nix closure at BUILD time (via
@@ -51,6 +51,23 @@
 #      preserving on its own; it is exactly the kind of thing that costs
 #      someone a full afternoon of "why do attachments 404" before they
 #      find it.
+#   4. Two instances of one defect class worth naming, because it is
+#      invisible in review and invisible at runtime: ONE configuration
+#      string consumed by TWO parsers that disagree. `memoryMax` goes to
+#      podman's `--memory` (case-INsensitive) and to systemd's `MemoryMax=`
+#      (case-SENSITIVE), so `256m` caps the container and leaves the slice
+#      at infinity. `slice` goes to NixOS's `systemd.slices.<name>` (bare
+#      name) and to systemd's `Slice=` (full unit name), so one spelling
+#      declares the cap on one slice and enrols the container in another.
+#      Neither mis-parse raises, logs, or shows up in `systemctl status`;
+#      both simply produce a limit that isn't there. The fix pattern is the
+#      same in both cases and generalises to any option a Nix module hands
+#      to more than one consumer: constrain the value to the INTERSECTION
+#      of what the consumers accept (asserted at eval, since nothing
+#      downstream will complain), and normalise, not pass through, where
+#      the two demand different spellings of the same thing. Test such an
+#      option on the RENDERED unit, never on the option value -- the option
+#      is correct in every one of these failures.
 #
 # Caveats, published deliberately rather than glossed over:
 #
@@ -96,6 +113,24 @@ let
     # `--arch arm64`, since the FOD hash is architecture-specific.
     arch = "amd64";
   };
+
+  # `slice` is one string handed to two APIs whose name grammars disagree.
+  # NixOS's `systemd.slices.<name>` attribute takes the BARE name and appends
+  # `.slice` itself when it renders the unit; systemd's own `Slice=` directive
+  # takes the FULL unit name. Passing the option's value verbatim to both --
+  # the obvious reading, and the one `slice`'s own `example` invites -- defines
+  # the unit `bulwark.slice.slice` and enrols the container in `bulwark.slice`:
+  # two different units. The cap then lands on a slice nothing runs in, while
+  # the container joins an auto-vivified, unconfigured one, which is the exact
+  # silent outcome `slice`'s description promises to prevent. So the value is
+  # normalised here rather than passed through: `sliceName` feeds the NixOS
+  # attribute, `sliceUnit` feeds `Slice=`, and both spellings a consumer might
+  # reasonably write ("bulwark", "bulwark.slice") land on the same pair.
+  #
+  # Forced only under the `cfg.slice != null` guards in `config` below, so the
+  # `null` default never reaches `removeSuffix`.
+  sliceName = lib.removeSuffix ".slice" cfg.slice;
+  sliceUnit = "${sliceName}.slice";
 in
 {
   options.nixmail.bulwark = {
@@ -409,16 +444,54 @@ in
 
     memoryMax = lib.mkOption {
       type = lib.types.str;
-      default = "256m";
+      default = "256M";
       description = ''
-        Hard cap passed to podman's own `--memory`. This is applied
-        UNCONDITIONALLY regardless of `slice` below -- it is podman's own
-        cgroup limit on this one container, independent of any host-level
-        systemd accounting. Next.js standalone idles around ~80-120 MB
-        RSS; 256m gives headroom for a couple of concurrent mailbox loads
-        without inviting the OOM killer for anything else sharing the
-        host. Raise cautiously on a memory-constrained host -- every extra
-        MB here is a MB unavailable to whatever else runs alongside it.
+        Hard cap on this container's memory. Passed UNCONDITIONALLY to
+        podman's own `--memory` -- podman's cgroup limit on this one
+        container, independent of any host-level systemd accounting -- and,
+        when `slice` below is set, ALSO written verbatim into that slice's
+        `MemoryMax=`. One string, two parsers, which is why its syntax is
+        constrained rather than freeform.
+
+        Write a NON-ZERO integer with an optional UPPERCASE
+        `K`/`M`/`G`/`T`/`P` suffix, or no suffix at all for plain bytes.
+        Both parsers read those suffixes as base 1024, so the same string
+        means the same number of bytes on either side. This is deliberately
+        a NARROW SUBSET of what the two have in common rather than their
+        full overlap -- both also take a decimal fraction (`1.5G`), which is
+        simply not worth the ambiguity for a cap on one container. Two
+        things sit just outside it in the directions that actually bite:
+
+          `E`  systemd takes it, podman's parser (Docker's `RAMInBytes`)
+               does not.
+          `0`  podman reads a limit of 0 as "no limit"; systemd rejects it
+               outright -- `Memory limit '0' out of range, ignoring` -- and
+               leaves the slice uncapped. Two consumers, opposite readings
+               of the same character, and both end up uncapped silently, so
+               it is refused rather than accepted as a way to spell "off".
+               Leave `slice` null if you want no slice-level cap.
+
+        The trap the constraint exists for: systemd's size parser is
+        case-SENSITIVE and podman's is not. A lowercase `256m` is happily
+        accepted by podman and silently DISCARDED by systemd --
+
+          Invalid memory limit '256m', ignoring: Invalid argument
+
+        -- leaving the slice at `MemoryMax=infinity` while the configuration
+        reads as though it declared a cap. `systemctl status` shows a
+        healthy unit, `systemctl show` reports the real (absent) limit only
+        if you go looking, and nothing anywhere fails. `256MB`/`256MiB` are
+        the same bug mirrored: podman takes them, systemd does not. The
+        assertion in `config` below rejects every one of these forms at
+        evaluation rather than uppercasing them silently -- a value that
+        means two different things to its two consumers is a configuration
+        error, not something to paper over.
+
+        Next.js standalone idles around ~80-120 MB RSS; 256M gives headroom
+        for a couple of concurrent mailbox loads without inviting the OOM
+        killer for anything else sharing the host. Raise cautiously on a
+        memory-constrained host -- every extra MB here is a MB unavailable
+        to whatever else runs alongside it.
       '';
     };
 
@@ -427,29 +500,47 @@ in
       default = null;
       example = "bulwark.slice";
       description = ''
-        Optional systemd slice name to place this container's unit into,
-        for host-level memory accounting/capping ON TOP OF podman's own
+        Optional systemd slice to place this container's unit into, for
+        host-level memory accounting/capping ON TOP OF podman's own
         `--memory` (see `memoryMax`) -- useful if you want `systemd-cgtop`/
         `systemd-run --slice` visibility, or if several units are meant to
         share one memory budget together.
 
-        When set, this module DEFINES `systemd.slices.<slice>` itself
-        (with a `MemoryMax` mirroring `memoryMax`), specifically so the
-        reference this module writes into the container unit's `Slice=`
-        is always guaranteed to resolve to something real. The trap this
-        avoids: a slice referenced by `Slice=` but declared NOWHERE in
-        NixOS config is not an error -- systemd auto-vivifies an empty,
-        UNCONFIGURED slice unit on demand. The container starts, nothing
-        logs a warning, and the memory cap you thought you were applying
-        at the slice level is simply never enforced there, silently,
-        forever -- exactly the shape of bug that survives for a long time
-        precisely because nothing about it looks broken. If you want a
-        slice shared with OTHER units under your own control (not just
-        this one container), declare `systemd.slices.<name>` yourself with
-        whatever config you want, point this option at that same name,
-        and this module's own default `systemd.slices` entry for it simply
-        won't be the only definition -- NixOS merges multiple modules'
-        config for the same slice normally.
+        Give it either as the bare name (`bulwark`) or as the full unit
+        name (`bulwark.slice`); both are accepted and normalised to the
+        same slice. They have to be, because the two consumers of this one
+        string disagree about which spelling they take -- see this
+        module's `sliceName`/`sliceUnit` comment for the mismatch and the
+        cross-wiring it produces if the value is passed through verbatim.
+
+        When set, this module DEFINES the slice itself, with a `MemoryMax`
+        mirroring `memoryMax`, specifically so the reference it writes into
+        the container unit's `Slice=` is always guaranteed to resolve to
+        something real and configured. The trap this avoids: a slice
+        referenced by `Slice=` but declared NOWHERE in NixOS config is not
+        an error -- systemd auto-vivifies an empty, UNCONFIGURED slice unit
+        on demand. The container starts, nothing logs a warning, and the
+        memory cap you thought you were applying at the slice level is
+        simply never enforced there, silently, forever -- exactly the shape
+        of bug that survives for a long time precisely because nothing
+        about it looks broken. Note that the mirrored `MemoryMax` only
+        enforces anything because `memoryMax`'s syntax is constrained to
+        what systemd's own parser accepts; a value systemd rejects lands
+        this in the identical uncapped state by a different route, which is
+        what that option's assertion is there to stop.
+
+        If you want a slice shared with OTHER units under your own control
+        (not just this one container), declare `systemd.slices.<name>`
+        yourself with whatever config you want, point this option at that
+        same name, and this module's own `systemd.slices` entry for it
+        simply won't be the only definition -- NixOS merges multiple
+        modules' config for the same slice normally. Two PLAIN definitions
+        of the same leaf (this module's `MemoryMax` and yours) do conflict
+        at eval time unless they are byte-for-byte the same string -- unit
+        settings merge with `mergeEqualOption` -- so either write the
+        identical value, or wrap yours in `lib.mkForce` (yours wins) or
+        `lib.mkDefault` (this module's wins), or leave this option `null`
+        and write the `Slice=` assignment yourself.
 
         Leave this `null` to skip host-level slice placement entirely and
         rely solely on podman's own `--memory` cgroup limit -- a single
@@ -539,6 +630,48 @@ in
     })
 
     {
+      # `memoryMax` is the one value this module hands to two different size
+      # parsers (podman's `--memory` and, under `slice`, systemd's
+      # `MemoryMax=`), and their accepted grammars only overlap -- they are
+      # not the same. Everything outside that overlap is accepted by exactly
+      # one of the two and silently ignored by the other, so neither podman
+      # nor systemd nor `systemctl status` would ever report it. Failing here,
+      # at evaluation, is the only place it CAN be reported. See `memoryMax`'s
+      # description for the full mechanism.
+      #
+      # The pattern is narrower than the true overlap on purpose: it also
+      # excludes the decimal fractions both parsers happen to take, and a
+      # leading zero digit, so that `0`/`0M` cannot get through. `0` is the
+      # one value the two read in OPPOSITE directions -- podman's "no limit"
+      # against systemd's `Memory limit '0' out of range, ignoring` -- and it
+      # is the shape someone reaches for to spell "cap off", which `slice =
+      # null` already does properly.
+      assertions = [
+        {
+          assertion = builtins.match "[1-9][0-9]*[KMGTP]?" cfg.memoryMax != null;
+          message = ''
+            nixmail.bulwark.memoryMax = "${cfg.memoryMax}" is not a size that
+            podman's `--memory` and systemd's `MemoryMax=` both parse the
+            same way. Write a non-zero integer with an optional UPPERCASE
+            K/M/G/T/P suffix (base 1024 in both), or no suffix for plain
+            bytes -- e.g. "256M".
+
+            Lowercase suffixes are the specific trap: podman accepts "256m",
+            systemd throws it away with
+
+              Invalid memory limit '256m', ignoring: Invalid argument
+
+            and the slice then runs at MemoryMax=infinity while this
+            configuration reads as though it declared a cap. "256MB" and
+            "256MiB" are the same bug mirrored -- podman takes them, systemd
+            does not; "1E" is the mirror once more, systemd's suffix that
+            podman's parser has never had; and "0" means "no limit" to
+            podman but is out of range for systemd, which discards it. To
+            run with no slice-level cap, leave `slice` null.
+          '';
+        }
+      ];
+
       virtualisation.oci-containers.containers.bulwark = {
         # `image` is the name:tag the loaded tarball carries; podman
         # resolves it against whatever `imageFile` (if non-null) just
@@ -595,7 +728,10 @@ in
         environmentFiles = [ cfg.environmentFile ];
 
         # `--memory` is podman's own cgroup cap, applied unconditionally
-        # (see memoryMax) independent of whether `slice` is set.
+        # (see memoryMax) independent of whether `slice` is set. It is the
+        # SAME string the slice's `MemoryMax=` gets below, which is what
+        # constrains memoryMax's syntax to the two parsers' overlap -- see
+        # the assertion above.
         # `--userns=keep-id` is what makes stateDir's ownership model work
         # under rootless podman -- see stateDir's description for the
         # full mechanism and why a plain chown does not achieve the same
@@ -621,12 +757,17 @@ in
         # This is what actually enrolls the unit's cgroup into the slice;
         # podman's own --memory above is the redundant inner cap. See
         # `slice`'s description for why this module also has to DEFINE
-        # the slice below, not just reference it.
-        serviceConfig.Slice = cfg.slice;
+        # the slice below, not just reference it -- and `sliceUnit`'s own
+        # comment for why the full unit name is spelled out here while the
+        # bare name keys the `systemd.slices` entry.
+        serviceConfig.Slice = sliceUnit;
       };
 
       systemd.slices = lib.mkIf (cfg.slice != null) {
-        ${cfg.slice}.sliceConfig.MemoryMax = cfg.memoryMax;
+        # Keyed by the BARE name: NixOS appends `.slice` itself when it
+        # renders this into a unit, so `sliceName` here and `sliceUnit`
+        # above name one and the same slice.
+        ${sliceName}.sliceConfig.MemoryMax = cfg.memoryMax;
       };
     }
   ]);
