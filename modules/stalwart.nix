@@ -1375,29 +1375,163 @@ in
       description = "Fail if outbound mail is stuck in the Stalwart queue";
       after = [ "stalwart.service" ];
       serviceConfig.Type = "oneshot";
+      # THE PARSER IS NOT ON THE DEFAULT PATH. A systemd `script` gets coreutils,
+      # findutils, gnugrep, gnused and systemd -- and nothing else. This unit
+      # shipped for months calling `awk`, which is in none of those, and was in
+      # consequence STRUCTURALLY INCAPABLE OF ALERTING: awk resolved to nothing,
+      # so the counting pipeline below died on every single tick while the unit
+      # reported "queue draining normally" and exited 0. Measured on the live
+      # production host before this fix: 41 "awk: command not found" lines and 41
+      # "queue draining normally" lines in the same 12-hour window. Anything this
+      # script calls that is not in that five-package set belongs on this list.
+      path = [ pkgs.jq ];
       script = ''
-        set -u
+        # pipefail is load-bearing, not hygiene. Without it the status of
+        # `cli | jq | wc -l` is `wc -l`'s alone, which is 0 even when every
+        # earlier stage collapsed -- and `wc -l` on an empty stream prints 0, so
+        # `stuck` was always 0 and the guard below could never trip. That is the
+        # exact shape of the bug this unit shipped with: a monitor unable to tell
+        # "zero stuck messages" from "I failed to count", which is strictly worse
+        # than no monitor because it manufactures confidence.
+        set -euo pipefail
+
+        broken() {
+          echo "stalwart-queue-monitor: BROKEN MONITOR -- $1" >&2
+          echo "  Outbound health is UNKNOWN, not healthy. Do not read this run as green." >&2
+          exit 1
+        }
+
         # Read the password rather than sourcing it: the file is a plain
         # secret, and its value may legitimately contain shell metacharacters.
         pw=$(cat ${lib.escapeShellArg cfg.recoveryAdmin.passwordFile})
         cli="${cfg.cliPackage}/bin/stalwart-cli --url http://127.0.0.1:8080 --user ${lib.escapeShellArg cfg.recoveryAdmin.username} --password $pw"
 
-        # A message still queued past the threshold means delivery is failing.
-        # The CLI prints two ISO-8601 columns per row, "Next Retry" then
-        # "Received". Key on RECEIVED (the LAST timestamp on the line) -- age
-        # in the queue is the signal. Matching any timestamp would also fire on
-        # an overdue Next Retry, which is a different and noisier condition.
+        # WHAT THE CLI ACTUALLY PRINTS. Measured against a live server
+        # (stalwart-cli 1.0.12), not assumed -- `--json` is NDJSON, one JSON
+        # object per line, carrying the requested field plus `id` and nothing
+        # else. No header, no footer, no totals, no pager (the CLI only prompts
+        # "Show more?" on a TTY, and never in --json mode; it walks the API's
+        # pages itself). Literal, from the server this module manages:
+        #
+        #     $ stalwart-cli query Account --json --fields createdAt
+        #     {"createdAt":"2026-06-25T03:34:06Z","id":"s"}
+        #     {"createdAt":"2026-06-25T03:34:06Z","id":"r"}
+        #
+        # A `datetime` field comes back as an ISO-8601 UTC instant with a `Z`
+        # suffix -- confirmed on two different live objects of that type
+        # (Account.createdAt above, Certificate.notValidAfter
+        # "2028-09-09T18:39:18Z"). An EMPTY result set, which is what a healthy
+        # queue gives on every tick, prints ZERO BYTES and exits 0.
+        #
+        # THE HUMAN TABLE IS DELIBERATELY NOT PARSED. Its columns are whatever
+        # the SERVER's schema names as that object's default list, its headers
+        # are display labels rather than field names ("Expires" for
+        # notValidAfter), and its cells are truncated at 60 characters. An
+        # earlier version of this script parsed exactly that, keyed on an
+        # assumed "Next Retry"/"Received" column pair that no one had ever
+        # observed the server emit. `--json --fields` pins both the shape and
+        # the field, so neither depends on a display decision.
+        #
+        # `createdAt` is QueuedMessage's "when the message was received and
+        # queued" (`stalwart-cli describe QueuedMessage`), which is the age that
+        # matters. `nextRetry` would also fire on an overdue retry, a different
+        # and noisier condition. If that field is ever renamed this does not
+        # silently read zero either: `--fields <unknown>` exits 1 with
+        # "error: unknown field", which the query guard below turns into a
+        # BROKEN MONITOR.
+        #
+        # Lexicographic comparison IS chronological here: both sides are
+        # fixed-width UTC. Every row must carry a parseable createdAt -- a row
+        # that does not is an ERROR, never a "not stuck". That distinction is
+        # the whole difference between a parser and a wish, and self-test 3
+        # below is what proves this one has it.
+        countStuck() {
+          jq --raw-output --arg cutoff "$1" '
+            if type != "object" then
+              error("queue row is not a JSON object: \(tojson)")
+            elif (.createdAt | type) != "string" then
+              error("queue row carries no string createdAt: \(tojson)")
+            elif (.createdAt | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]+)?Z$") | not) then
+              error("queue row createdAt is not an ISO-8601 UTC instant: \(tojson)")
+            else
+              select(.createdAt < $cutoff) | .createdAt
+            end
+          ' | wc -l
+        }
+
         cutoff=$(date -u -d "-${toString cfg.queueMonitor.maxAgeMinutes} minutes" +%Y-%m-%dT%H:%M:%SZ)
-        stuck=$($cli query QueuedMessage 2>/dev/null \
-          | awk -v c="$cutoff" 'NR>1 { r=""; for (i=1;i<=NF;i++) if ($i ~ /^[0-9]{4}-[0-9]{2}-[0-9]{2}T/) r=$i; if (r != "" && r < c) print }' \
-          | wc -l)
+
+        # SELF-TEST -- the part that makes a BROKEN monitor loud instead of green.
+        # Tool presence alone is not the property that matters; what matters is
+        # that the counting pipeline still returns a TRUE COUNT. So it runs the
+        # REAL `countStuck` (not a copy of it) over fixtures in the CLI's real
+        # recorded output shape, and asserts all three answers that matter.
+        #
+        # 1. THE EMPTY QUEUE -- zero bytes in, 0 out, exit 0. This is the case
+        #    the check actually sees on a healthy system, so it is the one most
+        #    worth pinning: "no output" must mean "nothing is stuck", and it
+        #    must be reached by parsing rather than by the pipeline collapsing.
+        if empty=$(printf "" | countStuck "$cutoff"); then
+          [ "$empty" = 0 ] || broken "parser self-test 1 (empty queue) expected 0, got '$empty'."
+        else
+          broken "parser self-test 1 (empty queue) could not run at all -- jq, date or wc is missing or failing."
+        fi
+
+        # 2. A REAL-SHAPED QUEUE -- rows in exactly the NDJSON grammar recorded
+        #    above, one older than any cutoff and one that is not old until the
+        #    year 2999. The answer is 1 whatever the clock says.
+        if some=$(printf '%s\n' \
+          '{"createdAt":"1970-01-01T00:00:00Z","id":"selftest-stuck"}' \
+          '{"createdAt":"2999-01-01T00:00:00Z","id":"selftest-fresh"}' \
+          | countStuck "$cutoff"); then
+          [ "$some" = 1 ] || broken "parser self-test 2 (one stuck of two) expected 1, got '$some'."
+        else
+          broken "parser self-test 2 (one stuck of two) could not run at all."
+        fi
+
+        # 3. THE WRONG SHAPE MUST FAIL. The human table that the earlier version
+        #    of this script parsed is fed in, and the parser is REQUIRED to
+        #    reject it. A self-test that only ever sees good input cannot tell a
+        #    working parser from one that answers 0 to everything -- which is
+        #    precisely the bug being fixed here, so the negative case is not
+        #    optional. Its stderr is dropped: a jq parse error is the expected
+        #    result of this case, and printing it would read as a fault.
+        if bad=$(printf '%s\n' \
+          'Id            Next Retry            Received' \
+          'aaaa  1970-01-01T00:00:00Z  1970-01-01T00:00:00Z' \
+          | countStuck "$cutoff" 2>/dev/null); then
+          broken "parser self-test 3 ACCEPTED the CLI's human table where NDJSON is required, and answered '$bad'. It is parsing a shape this command does not emit, so its count of the real queue would be fiction."
+        fi
+
+        # Capture the query as its own step instead of as the head of a pipe, so
+        # a management-API failure (Stalwart down, credentials rotated, admin
+        # account locked, field renamed) is distinguishable from a genuinely
+        # empty queue. The CLI's own stderr is left to flow to the journal
+        # rather than captured and re-echoed -- it is the useful diagnostic, and
+        # re-printing text that came back from a command invoked with a password
+        # on its argv is a good way to leak one.
+        if ! queue=$($cli query QueuedMessage --json --fields createdAt); then
+          broken "'stalwart-cli query QueuedMessage --json --fields createdAt' failed (its own error is above): the management API is unreachable, the credentials are rejected, or that field no longer exists."
+        fi
+
+        # `printf '%s'`, not `'%s\n'`: an empty queue is an empty string here,
+        # and appending a newline to it would feed the parser a blank line to
+        # rule on. jq tolerates that, but the input it is handed should be the
+        # bytes the CLI produced and nothing else.
+        stuck=$(printf '%s' "$queue" | countStuck "$cutoff") \
+          || broken "counting the live queue failed -- the CLI returned something this parser refused (its error is above). It is NOT a count of zero."
+        case "$stuck" in
+          ""|*[!0-9]*)
+            broken "counting the live queue yielded '$stuck', which is not a number."
+            ;;
+        esac
 
         if [ "$stuck" -gt 0 ]; then
           echo "stalwart-queue-monitor: $stuck message(s) queued longer than ${toString cfg.queueMonitor.maxAgeMinutes}m -- OUTBOUND DELIVERY IS FAILING" >&2
           echo "hint: check the delivery log for connect-errors; a stale cached relay route needs a FULL service restart, reload is not enough" >&2
           exit 1
         fi
-        echo "stalwart-queue-monitor: queue draining normally"
+        echo "stalwart-queue-monitor: queue draining normally (self-test passed: empty=0, fixture=1, human-table rejected; live queue parsed, 0 of it older than ${toString cfg.queueMonitor.maxAgeMinutes}m)"
       '';
     };
 
