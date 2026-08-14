@@ -82,6 +82,40 @@ in
       '';
     };
 
+    lhloName = lib.mkOption {
+      type = lib.types.str;
+      default = config.networking.fqdnOrHostName;
+      defaultText = lib.literalExpression "config.networking.fqdnOrHostName";
+      description = ''
+        The name this bridge announces in its LMTP `LHLO` greeting.
+
+        THIS IS A SPAM-SCORE INPUT, not cosmetics, and it is the single
+        highest-leverage line in this module. Mail servers score the
+        greeting name, and every mainstream ruleset penalises a greeting
+        that is not a fully-qualified domain name — Stalwart's shipped
+        ruleset scores `HELO_NOT_FQDN` at 2.0 against a default spam
+        threshold of 5.0. Because this bridge is on the delivery path of
+        EVERY inbound message, a bare label here does not make some mail
+        look worse: it applies a constant 2.0 handicap to all of it, and
+        silently converts the threshold into an effective 3.0.
+
+        Measured on the reference deployment (2026-08-14): a greeting of
+        `inbound-bridge` put roughly three quarters of all inbound mail
+        over the threshold, including CI notifications, invoices and a
+        provider security alert. A tag that fires on 100% of messages
+        carries no information — it is a bias, and biases in a scoring
+        system belong in the threshold, never smuggled in through a
+        greeting string.
+
+        Prefer a name that also RESOLVES to an A/AAAA or MX record: the
+        same rulesets carry a second, smaller penalty for an FQDN greeting
+        with no DNS behind it (`HELO_NORES_A_OR_MX`, 0.3). The default is
+        this host's own FQDN, which is the honest answer to "who is
+        greeting"; override it if the host's FQDN is not resolvable from
+        the mail server's vantage point and some other name of yours is.
+      '';
+    };
+
     maxSizeBytes = lib.mkOption {
       type = lib.types.ints.positive;
       default = 64 * 1024 * 1024;
@@ -225,6 +259,7 @@ in
         INBOUND_BRIDGE_PORT = toString cfg.listenPort;
         LMTP_HOST = cfg.lmtpHost;
         LMTP_PORT = toString cfg.lmtpPort;
+        LMTP_LHLO_NAME = cfg.lhloName;
         INBOUND_BRIDGE_MAX_SIZE = toString cfg.maxSizeBytes;
         INBOUND_BRIDGE_ALLOW_UNAUTHENTICATED = lib.boolToString cfg.allowUnauthenticated;
         INBOUND_BRIDGE_ALLOWED_CLIENTS = lib.concatStringsSep "," cfg.allowedClientAddresses;

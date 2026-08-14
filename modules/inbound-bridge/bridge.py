@@ -31,13 +31,18 @@ distinguishable HTTP status the caller can act on correctly.
 
 Stdlib only (http.server + smtplib), no third-party dependencies.
 """
-import logging, os, smtplib, sys
+import logging, os, smtplib, socket, sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 LISTEN_HOST = os.environ.get("INBOUND_BRIDGE_HOST", "127.0.0.1")
 LISTEN_PORT = int(os.environ.get("INBOUND_BRIDGE_PORT", "2526"))
 LMTP_HOST = os.environ.get("LMTP_HOST", "127.0.0.1")
 LMTP_PORT = int(os.environ.get("LMTP_PORT", "24"))
+# The name announced in LHLO. A SPAM-SCORE INPUT on every message this bridge
+# ever delivers -- see the `lhloName` option in ../inbound-bridge.nix for the
+# measurement and the reasoning. socket.getfqdn() rather than a bare label as
+# the fallback, so an operator who never sets it still gets a qualified name.
+LMTP_LHLO_NAME = os.environ.get("LMTP_LHLO_NAME", "").strip() or socket.getfqdn()
 SECRET = os.environ.get("INBOUND_BRIDGE_SECRET", "").strip()
 ALLOW_UNAUTHENTICATED = os.environ.get("INBOUND_BRIDGE_ALLOW_UNAUTHENTICATED", "").strip().lower() in (
     "1", "true", "yes",
@@ -64,7 +69,7 @@ def deliver_one(mail_from, rcpt, raw):
     """
     lmtp = smtplib.LMTP(LMTP_HOST, LMTP_PORT, timeout=60)
     try:
-        code, resp = lmtp.docmd("LHLO", "inbound-bridge")   # LMTP greets with LHLO, not HELO/EHLO
+        code, resp = lmtp.docmd("LHLO", LMTP_LHLO_NAME)     # LMTP greets with LHLO, not HELO/EHLO
         if code >= 400:
             return False, True, f"LHLO {code} {resp!r}"
         code, resp = lmtp.mail(mail_from or "")
