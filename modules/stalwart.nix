@@ -1391,6 +1391,28 @@ in
           but its own copy cannot be filed.
         '';
       };
+      restartServerAfterApply = mkOption {
+        type = types.bool;
+        default = true;
+        description = ''
+          Restart `stalwart.service` after the settings plan is applied.
+
+          Required for the settings to take effect, and it is on by default
+          because leaving it off makes this whole unit a no-op that LOOKS like
+          it worked. Stalwart 0.16 reads these registry values into memory at
+          startup and has no reload path: the management API exposes no reload
+          endpoint (`POST /api/reload` and its obvious spellings all 404) and
+          `stalwart-cli` has no reload verb. Measured on a live 0.16.16 server:
+          three minutes after `apply` reported `4 updated`, the SMTP listener
+          was still advertising the OLD `SIZE`.
+
+          The restart is issued only on the runs that actually change something
+          -- the marker file short-circuits every other run -- so this costs one
+          restart per real configuration change, not one per boot. The marker is
+          written BEFORE the restart, so the unit that comes back up after it
+          sees its own plan as applied and stops rather than looping.
+        '';
+      };
       extraSettingsOps = mkOption {
         type = types.listOf types.attrs;
         default = [ ];
@@ -1917,6 +1939,15 @@ in
         if ${cfg.cliPackage}/bin/stalwart-cli --url http://127.0.0.1:8080 --user ${lib.escapeShellArg cfg.recoveryAdmin.username} --password "$pw" apply --file ${settingsPlan}; then
           echo "${settingsHash}" > "$marker"
           echo "stalwart-settings: applied plan ${settingsHash}"
+${optionalString cfg.limits.restartServerAfterApply ''
+          # --no-block is load-bearing, not politeness. This unit is ordered
+          # After=stalwart.service, so a SYNCHRONOUS restart job would be
+          # ordered against the very unit whose start job is still active --
+          # systemd resolves that by deadlocking one of them. Detaching the job
+          # lets this unit exit first and the restart run immediately after.
+          echo "stalwart-settings: restarting stalwart to load the new settings"
+          systemctl --no-block try-restart stalwart.service || true
+''}
         else
           echo "stalwart-settings: apply reported errors (see above) -- marker NOT written, will retry" >&2
           exit 1
