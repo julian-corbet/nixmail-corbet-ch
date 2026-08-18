@@ -486,6 +486,75 @@ let
   # version (identified by this hash), never on every boot.
   planHash = builtins.hashString "sha256" (builtins.readFile applyPlan);
 
+  # ── Mutable runtime settings (idempotent `update` ops) ────────────────────
+  #
+  # WHY THIS IS A SECOND PLAN AND NOT MORE LINES IN `planOps`.
+  # `planOps` is create-only, and the stalwart-config unit below gates it
+  # behind a virgin-database guard: once the database holds any of the plan's
+  # own domains, that unit records the hash and returns WITHOUT applying
+  # anything -- forever. That is right for `create` ops (re-creating a Domain
+  # or Directory duplicates it and leaves dangling `#localId` references), but
+  # it also means no value carried in that plan can ever be CHANGED again
+  # after the first boot. Anything declared there is, on a live deployment,
+  # decoration: the server keeps Stalwart's compiled-in default. That is how a
+  # mail server ends up advertising a 100 MiB SMTP `SIZE` while the very next
+  # hop refuses anything over 25 MiB -- accepted at submission, bounced later.
+  #
+  # `update` ops carry none of that hazard. They address singleton registry
+  # objects by name, hold no `#localId` cross-reference that only resolves
+  # inside the apply that created its target, and are idempotent -- applying
+  # the same values twice is a no-op. So they get their own plan, their own
+  # marker file and their own unit, with NO domain guard, re-applied whenever
+  # the rendered values change.
+  #
+  # Shapes verified against stalwart-cli 1.0.12 on a live 0.16.16 registry with
+  # `apply --dry-run`, which reported "0 destroy, 4 update, 0 create".
+
+  # Drop options the consumer left at null, so an `update` only ever carries
+  # fields that were actually declared. Without this a single unset option
+  # would emit `null` and clear a value the module was never asked to manage.
+  definedFields = filterAttrs (_: v: v != null);
+
+  # One `update` op per registry object, omitted entirely when every field of
+  # that object is unset -- an op with an empty value would change nothing and
+  # still churn the plan hash, re-running the unit on every rebuild.
+  settingsObjectOp = object: fields:
+    let kept = definedFields fields;
+    in optional (kept != { }) {
+      "@type" = "update";
+      inherit object;
+      value = kept;
+    };
+
+  settingsOps =
+    # `MtaStageData.maxMessageSize` is `object<Expression>`, NOT a bare number
+    # (`stalwart-cli describe MtaStageData`). Its live shape is
+    # `{match:{}, else:"<bytes>"}` with the byte count as a STRING; a plain
+    # integer is rejected by the schema. `else` is a Nix keyword, hence quoted.
+    (settingsObjectOp "MtaStageData" {
+      maxMessageSize = mapNullable (n: { "else" = toString n; }) cfg.limits.smtpMaxMessageSize;
+    })
+    ++ (settingsObjectOp "Email" {
+      maxMessageSize = cfg.limits.emailMaxMessageSize;
+      maxAttachmentSize = cfg.limits.emailMaxAttachmentSize;
+    })
+    ++ (settingsObjectOp "Jmap" {
+      maxUploadSize = cfg.limits.jmapMaxUploadSize;
+      uploadQuota = cfg.limits.jmapUploadQuota;
+    })
+    ++ (settingsObjectOp "Imap" {
+      maxRequestSize = cfg.limits.imapMaxRequestSize;
+    })
+    ++ cfg.limits.extraSettingsOps;
+
+  settingsPlan = pkgs.writeText "stalwart-settings.ndjson" (
+    concatStringsSep "\n" (map builtins.toJSON settingsOps) + "\n"
+  );
+
+  # Same marker discipline as the bootstrap plan: the unit re-applies only
+  # when the rendered VALUES change, not on every boot.
+  settingsHash = builtins.hashString "sha256" (builtins.readFile settingsPlan);
+
   stateDirBaseName = removePrefix "/var/lib/" (toString cfg.stateDir);
 
   stalwartPkg =
@@ -1173,6 +1242,131 @@ in
       };
     };
 
+    # ── Size limits ──────────────────────────────────────────────────────
+    #
+    # Every option here is null by default, which means "leave Stalwart's own
+    # compiled-in default alone". Set one and it is applied, and KEPT applied,
+    # by the stalwart-settings unit (see the `settingsOps` comment above for
+    # why that is a separate unit from the bootstrap).
+    #
+    # WIRE FORMAT vs FILE SIZE -- the distinction that makes these numbers
+    # confusing in practice. A limit measured on the WIRE applies to the
+    # RFC822 message as transmitted, in which every attachment is
+    # base64-encoded: 76 output characters plus CRLF for each 57 input bytes,
+    # a factor of ~1.3684. A limit measured in RAW octets applies to the file
+    # itself. So a 25 MiB wire ceiling carries an attachment of about 19.2 MB,
+    # and two limits that look equal in bytes are not equal in what they let a
+    # user send. Each option below states which of the two it is.
+    limits = {
+      markerFile = mkOption {
+        type = types.path;
+        default = "${cfg.stateDir}/.applied-settings";
+        description = "Where the settings unit records the hash of the settings plan it last applied. Deliberately a DIFFERENT file from `bootstrap.markerFile`: the two plans change independently, and sharing one marker would make a settings change look like a bootstrap re-run (and vice versa).";
+      };
+      smtpMaxMessageSize = mkOption {
+        type = types.nullOr types.ints.positive;
+        default = null;
+        example = 26214400;
+        description = ''
+          `MtaStageData.maxMessageSize` -- the largest message, in bytes of
+          WIRE format, that the SMTP and LMTP stack will accept.
+
+          This is also the number the server advertises in its ESMTP `SIZE`
+          capability, which is the only way a submitting client learns the
+          limit before it spends bandwidth. Keep it in step with whatever the
+          NEXT hop accepts (a smarthost, an outbound bridge, a relay API): a
+          server that advertises more than the next hop takes will accept a
+          message at submission and bounce it afterwards, which is strictly
+          worse than refusing it up front.
+
+          Note this one number governs BOTH directions -- inbound LMTP and
+          outbound submission -- so if inbound arrives through a gateway that
+          appends `Received:` headers, leave headroom above that gateway's own
+          ceiling or an inbound message sized exactly at it will be refused.
+        '';
+      };
+      emailMaxMessageSize = mkOption {
+        type = types.nullOr types.ints.positive;
+        default = null;
+        example = 26214400;
+        description = ''
+          `Email.maxMessageSize` -- largest assembled message, in bytes of
+          WIRE format, that the JMAP layer will build and submit. This is the
+          gate a webmail client hits when it presses Send.
+        '';
+      };
+      emailMaxAttachmentSize = mkOption {
+        type = types.nullOr types.ints.positive;
+        default = null;
+        example = 19000000;
+        description = ''
+          `Email.maxAttachmentSize` -- the summed size of a message's
+          attachments, in RAW octets (not wire format).
+
+          Set this to `smtpMaxMessageSize` divided by ~1.37, not to the same
+          number: the attachments are still un-encoded when this is checked and
+          will grow by that factor before anything measures them against a
+          wire limit. Setting the two equal is what produces the failure where
+          a file attaches without complaint and the send bounces afterwards.
+        '';
+      };
+      jmapMaxUploadSize = mkOption {
+        type = types.nullOr types.ints.positive;
+        default = null;
+        example = 19000000;
+        description = ''
+          `Jmap.maxUploadSize` -- largest single upload, in RAW octets, that
+          the JMAP upload endpoint accepts. This is the FIRST gate a webmail
+          attachment meets, so it is the one that can still produce a useful
+          error message in the composer; every later gate fails after the user
+          has already waited for the upload. Keep it in step with
+          `emailMaxAttachmentSize`.
+        '';
+      };
+      jmapUploadQuota = mkOption {
+        type = types.nullOr types.ints.positive;
+        default = null;
+        example = 10737418240;
+        description = ''
+          `Jmap.uploadQuota` -- total bytes of temporary upload blobs one
+          account may hold within the upload TTL window.
+
+          This is a per-account rate limit, not a message limit, and Stalwart's
+          default is small enough that a bulk import or a migration hits it
+          long before it hits any size limit. It is also exactly the kind of
+          value that gets raised by hand during such an import and then
+          silently reverts on the next major-version migration, because
+          nothing re-asserts it -- which is the reason it is an option here.
+        '';
+      };
+      imapMaxRequestSize = mkOption {
+        type = types.nullOr types.ints.positive;
+        default = null;
+        example = 27262976;
+        description = ''
+          `Imap.maxRequestSize` -- largest IMAP request, in bytes of WIRE
+          format, the server will accept. In practice this is the `APPEND`
+          ceiling: it caps saving a large sent-copy or draft into a mailbox,
+          so a value below `smtpMaxMessageSize` means a message can be sent
+          but its own copy cannot be filed.
+        '';
+      };
+      extraSettingsOps = mkOption {
+        type = types.listOf types.attrs;
+        default = [ ];
+        description = ''
+          Additional raw `update` ops appended to the settings plan, for
+          mutable registry values this module has no dedicated option for.
+
+          Only ever put IDEMPOTENT ops here -- ops that address a singleton
+          object and carry no `#localId` reference. This plan is re-applied
+          whenever it changes and has no virgin-database guard in front of it;
+          a `create` op placed here would run against a populated database.
+          Use `bootstrap.extraPlanOps` for anything that must be created once.
+        '';
+      };
+    };
+
     dependsOnUnits = mkOption {
       type = types.listOf types.str;
       default = [ ];
@@ -1608,6 +1802,69 @@ in
           echo "stalwart-config: applied plan ${planHash}"
         else
           echo "stalwart-config: apply reported errors (see above) -- marker NOT written"
+        fi
+      '';
+    };
+
+    # Applies the mutable-settings plan. Deliberately a SEPARATE unit from
+    # stalwart-config rather than more lines in it: that unit must keep its
+    # virgin-database guard (its plan creates objects), and this one must NOT
+    # have it (its plan only updates singletons, and the whole point is that it
+    # still runs on an already-configured database). Sharing a unit would mean
+    # choosing one behaviour for both.
+    systemd.services.stalwart-settings = mkIf (cfg.bootstrap.enable && settingsOps != [ ]) {
+      description = "Apply Stalwart mutable runtime settings (idempotent update-only plan)";
+      # Ordered after stalwart-config so that on a genuinely fresh database the
+      # objects exist before these updates address them. `after` only -- not
+      # `requires` -- because stalwart-config skipping (which is its normal
+      # steady state) must not stop these settings being applied.
+      after = [ "stalwart.service" "stalwart-config.service" ];
+      requires = [ "stalwart.service" ];
+      wantedBy = [ "multi-user.target" ];
+      serviceConfig = {
+        Type = "oneshot";
+        RemainAfterExit = true;
+      };
+      restartTriggers = [ settingsPlan ];
+      script = ''
+        set -u
+        marker=${lib.escapeShellArg cfg.limits.markerFile}
+        if [ "$(cat "$marker" 2>/dev/null)" = "${settingsHash}" ]; then
+          echo "stalwart-settings: plan ${settingsHash} already applied -- skipping"
+          exit 0
+        fi
+        pw=$(cat ${lib.escapeShellArg cfg.recoveryAdmin.passwordFile})
+
+        # Same readiness poll as stalwart-config: the management API comes up
+        # after the server socket does, and a settings apply against a
+        # not-yet-authenticating API would otherwise fail once per boot.
+        ok=0
+        for i in $(seq 1 ${toString (cfg.bootstrap.readinessTimeout / 2)}); do
+          if ${cfg.cliPackage}/bin/stalwart-cli --url http://127.0.0.1:8080 --user ${lib.escapeShellArg cfg.recoveryAdmin.username} --password "$pw" query Domain >/dev/null 2>&1; then
+            ok=1
+            break
+          fi
+          sleep 2
+        done
+        if [ "$ok" != 1 ]; then
+          echo "stalwart-settings: management API not reachable/authenticated within ${toString cfg.bootstrap.readinessTimeout}s -- leaving for next boot"
+          exit 0
+        fi
+
+        # NO domain guard here, and that is the entire difference from
+        # stalwart-config. These ops are updates against singletons: running
+        # them against a populated database is the intended case, not the
+        # hazard. See the `settingsOps` comment in this module's `let` block.
+        #
+        # No --continue-on-error either: every op in this plan is a value the
+        # consumer explicitly asked for, so a partial apply must leave the
+        # marker unwritten and retry, not be recorded as done.
+        if ${cfg.cliPackage}/bin/stalwart-cli --url http://127.0.0.1:8080 --user ${lib.escapeShellArg cfg.recoveryAdmin.username} --password "$pw" apply --file ${settingsPlan}; then
+          echo "${settingsHash}" > "$marker"
+          echo "stalwart-settings: applied plan ${settingsHash}"
+        else
+          echo "stalwart-settings: apply reported errors (see above) -- marker NOT written, will retry" >&2
+          exit 1
         fi
       '';
     };
