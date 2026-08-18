@@ -1277,7 +1277,19 @@ in
       markerFile = mkOption {
         type = types.path;
         default = "${cfg.stateDir}/.applied-settings";
-        description = "Where the settings unit records the hash of the settings plan it last applied. Deliberately a DIFFERENT file from `bootstrap.markerFile`: the two plans change independently, and sharing one marker would make a settings change look like a bootstrap re-run (and vice versa).";
+        description = ''
+          Where the settings unit records the hash of the settings plan it last
+          applied. Deliberately a DIFFERENT file from `bootstrap.markerFile`:
+          the two plans change independently, and sharing one marker would make
+          a settings change look like a bootstrap re-run (and vice versa).
+
+          KNOWN LIMIT, stated because the difference matters: the hash is
+          computed from the DECLARED values, so the unit re-applies whenever
+          this configuration changes, but it does not detect the server drifting
+          underneath it -- a value edited in the WebUI, or reset by a
+          major-version migration, is not noticed until the declaration changes
+          or the marker is removed. Deleting this file forces a re-apply.
+        '';
       };
       smtpMaxMessageSize = mkOption {
         type = types.nullOr types.ints.positive;
@@ -1901,6 +1913,19 @@ in
       serviceConfig = {
         Type = "oneshot";
         RemainAfterExit = true;
+        # Without this the `exit 1` below is a dead end: switch-to-configuration
+        # does not re-run a failed unit whose plan has not changed, so a single
+        # transient failure (server still starting, a lost connection mid-apply)
+        # would leave the declared settings unapplied until someone noticed by
+        # hand. `on-failure` is legal on Type=oneshot -- `always` is not, and
+        # systemd rejects the unit file outright if you use it.
+        #
+        # No TimeoutStartSec is needed: Type=oneshot defaults to infinity, not
+        # to DefaultTimeoutStartSec, so the readiness loop below runs to its own
+        # deadline rather than being SIGTERMed at 90s (verified live:
+        # `systemctl show stalwart-settings -p TimeoutStartUSec` -> infinity).
+        Restart = "on-failure";
+        RestartSec = 30;
       };
       restartTriggers = [ settingsPlan ];
       script = ''
@@ -1924,8 +1949,13 @@ in
           sleep 2
         done
         if [ "$ok" != 1 ]; then
-          echo "stalwart-settings: management API not reachable/authenticated within ${toString cfg.bootstrap.readinessTimeout}s -- leaving for next boot"
-          exit 0
+          # FAIL, deliberately, rather than the bootstrap unit's exit 0. That
+          # unit populates an empty database and can honestly wait for the next
+          # boot; this one is the only thing asserting the declared limits, and
+          # a green unit that applied nothing is indistinguishable from a green
+          # unit that applied everything. Restart=on-failure retries it.
+          echo "stalwart-settings: management API not reachable/authenticated within ${toString cfg.bootstrap.readinessTimeout}s -- failing so it is retried" >&2
+          exit 1
         fi
 
         # NO domain guard here, and that is the entire difference from
