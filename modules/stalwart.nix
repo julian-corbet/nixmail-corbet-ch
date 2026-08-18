@@ -531,8 +531,24 @@ let
     # (`stalwart-cli describe MtaStageData`). Its live shape is
     # `{match:{}, else:"<bytes>"}` with the byte count as a STRING; a plain
     # integer is rejected by the schema. `else` is a Nix keyword, hence quoted.
+    #
+    # `match` is an OBJECT keyed "0", "1", ... -- NOT a JSON array. Getting that
+    # wrong does not error; it silently matches nothing and every port quietly
+    # falls through to `else`. Stalwart's own shipped config uses the same shape
+    # for `addReceivedHeader` (`local_port == 25`), which is where this was read
+    # from rather than guessed.
     (settingsObjectOp "MtaStageData" {
-      maxMessageSize = mapNullable (n: { "else" = toString n; }) cfg.limits.smtpMaxMessageSize;
+      maxMessageSize = mapNullable
+        (n: {
+          "else" = toString n;
+          match = listToAttrs (imap0
+            (i: port: nameValuePair (toString i) {
+              "if" = "local_port == ${port}";
+              "then" = toString cfg.limits.smtpMaxMessageSizeByPort.${port};
+            })
+            (attrNames cfg.limits.smtpMaxMessageSizeByPort));
+        })
+        cfg.limits.smtpMaxMessageSize;
     })
     ++ (settingsObjectOp "Email" {
       maxMessageSize = cfg.limits.emailMaxMessageSize;
@@ -1285,6 +1301,30 @@ in
           ceiling or an inbound message sized exactly at it will be refused.
         '';
       };
+      smtpMaxMessageSizeByPort = mkOption {
+        type = types.attrsOf types.ints.positive;
+        default = { };
+        example = { "2424" = 27262976; };
+        description = ''
+          Per-listener overrides of `smtpMaxMessageSize`, keyed by local port.
+          Any port not named here gets `smtpMaxMessageSize`.
+
+          This exists because ONE size limit has to serve two populations with
+          opposite requirements. The submission ports must advertise exactly
+          what the next hop out will accept, or a client is told its message was
+          sent and gets a bounce afterwards. An INGRESS port has no next hop and
+          the opposite failure: a message that arrived at some upstream
+          gateway's own ceiling has since grown -- envelope rewriting, a
+          `Received:` header, dot-stuffing -- so a limit equal to that gateway's
+          refuses mail the gateway already accepted, and it refuses it at the
+          last possible moment.
+
+          Giving the ingress port its own, higher value is what lets the
+          advertised number stay honest without inheriting that edge. Set only
+          the ports that genuinely need to differ; a value here that is LOWER
+          than `smtpMaxMessageSize` is legal but almost always a mistake.
+        '';
+      };
       emailMaxMessageSize = mkOption {
         type = types.nullOr types.ints.positive;
         default = null;
@@ -1449,6 +1489,21 @@ in
     warnings = (collectProbes [ identitiesProbe groupsProbe ]).warnings;
 
     assertions = [
+      {
+        # Without this the mistake is SILENT: smtpMaxMessageSize null makes the
+        # whole MtaStageData field drop out, taking every per-port override with
+        # it, and the server keeps its compiled-in default while the config
+        # plainly says otherwise.
+        assertion = cfg.limits.smtpMaxMessageSizeByPort == { } || cfg.limits.smtpMaxMessageSize != null;
+        message = ''
+          nixmail.stalwart.limits.smtpMaxMessageSizeByPort is set but
+          smtpMaxMessageSize is null. The per-port values are rendered as
+          `match` conditions on the SAME registry field, whose `else` branch is
+          smtpMaxMessageSize -- with no `else` there is nothing to attach them
+          to, so they would be dropped silently. Set smtpMaxMessageSize to the
+          value every other port should get.
+        '';
+      }
       {
         assertion = hasAttr cfg.defaultDomain cfg.domains;
         message = ''
