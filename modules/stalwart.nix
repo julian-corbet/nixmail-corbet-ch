@@ -1908,7 +1908,16 @@ in
       # `requires` -- because stalwart-config skipping (which is its normal
       # steady state) must not stop these settings being applied.
       after = [ "stalwart.service" "stalwart-config.service" ];
-      requires = [ "stalwart.service" ];
+      # `wants`, NOT `requires`, and that is deliberate. This unit restarts
+      # stalwart.service itself when the settings change; with `requires` that
+      # restart propagates a STOP back to this unit, systemd SIGTERMs it
+      # mid-run, and the unit lands in `failed` with `result 'signal'` even
+      # though the apply succeeded a second earlier. On a mail host that is a
+      # false alarm that costs someone a night. The work is already done and the
+      # marker already written by then, so nothing is lost -- but nothing should
+      # look broken either. Ordering (`after`) is what actually matters here;
+      # the readiness loop below covers a server that is not up yet.
+      wants = [ "stalwart.service" ];
       wantedBy = [ "multi-user.target" ];
       serviceConfig = {
         Type = "oneshot";
