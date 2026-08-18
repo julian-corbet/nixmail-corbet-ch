@@ -130,6 +130,22 @@ in
       '';
     };
 
+    lmtpTimeoutSeconds = lib.mkOption {
+      type = lib.types.ints.positive;
+      default = 60;
+      description = ''
+        How long to wait on the LMTP socket before giving up on one
+        delivery. The bound that matters here is the mail server's
+        post-DATA work -- filtering, indexing, fsync -- not the network,
+        which is loopback; on a small or memory-pressured host that work
+        can take far longer than the transfer it follows. Setting this
+        too low does not merely delay a message: the caller is told
+        "temporary failure" for a delivery the mail server may in fact
+        have completed, and a caller that retries on tempfail will then
+        re-offer the same message indefinitely.
+      '';
+    };
+
     secretFile = lib.mkOption {
       type = lib.types.nullOr lib.types.path;
       default = null;
@@ -261,6 +277,7 @@ in
         LMTP_PORT = toString cfg.lmtpPort;
         LMTP_LHLO_NAME = cfg.lhloName;
         INBOUND_BRIDGE_MAX_SIZE = toString cfg.maxSizeBytes;
+        INBOUND_BRIDGE_LMTP_TIMEOUT = toString cfg.lmtpTimeoutSeconds;
         INBOUND_BRIDGE_ALLOW_UNAUTHENTICATED = lib.boolToString cfg.allowUnauthenticated;
         INBOUND_BRIDGE_ALLOWED_CLIENTS = lib.concatStringsSep "," cfg.allowedClientAddresses;
         INBOUND_BRIDGE_LOG_LEVEL = cfg.logLevel;

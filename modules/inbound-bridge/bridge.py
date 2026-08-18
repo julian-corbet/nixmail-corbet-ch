@@ -48,6 +48,12 @@ ALLOW_UNAUTHENTICATED = os.environ.get("INBOUND_BRIDGE_ALLOW_UNAUTHENTICATED", "
     "1", "true", "yes",
 )
 MAX_SIZE = int(os.environ.get("INBOUND_BRIDGE_MAX_SIZE", str(64 * 1024 * 1024)))
+# Seconds to wait on the LMTP socket. This bounds the SLOWEST phase of ingest --
+# the mail server's post-DATA work (filtering, indexing, fsync) -- not the
+# network, which is loopback. Too low on a small or loaded host and a delivery
+# that would have succeeded is reported as a tempfail, whereupon the caller
+# re-offers the same message forever.
+LMTP_TIMEOUT = int(os.environ.get("INBOUND_BRIDGE_LMTP_TIMEOUT", "60"))
 ALLOWED_CLIENTS = {
     a.strip() for a in os.environ.get("INBOUND_BRIDGE_ALLOWED_CLIENTS", "").split(",") if a.strip()
 }
@@ -67,7 +73,7 @@ def deliver_one(mail_from, rcpt, raw):
     every entry in the caller's result map reflects what really happened
     to that one mailbox.
     """
-    lmtp = smtplib.LMTP(LMTP_HOST, LMTP_PORT, timeout=60)
+    lmtp = smtplib.LMTP(LMTP_HOST, LMTP_PORT, timeout=LMTP_TIMEOUT)
     try:
         code, resp = lmtp.docmd("LHLO", LMTP_LHLO_NAME)     # LMTP greets with LHLO, not HELO/EHLO
         if code >= 400:
