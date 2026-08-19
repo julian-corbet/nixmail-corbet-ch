@@ -2,14 +2,43 @@ name: ci
 
 on:
   push:
-    branches: [main]
+    branches: [ main ]
   pull_request:
+  workflow_dispatch:
 
 jobs:
-  nix-flake-check:
+  check:
     runs-on: ubuntu-latest
+
+    # A hung evaluation must fail, not sit on a runner until GitHub's six-hour
+    # ceiling. Observed p95 for this job is ~1m10s; `--all-systems` adds a
+    # second full evaluation on top of that, and ten minutes is still the floor
+    # worth waiting before calling it stuck.
+    timeout-minutes: 10
+
     steps:
       - uses: actions/checkout@v4
       - uses: cachix/install-nix-action@v27
-      - name: nix flake check
-        run: nix flake check --print-build-logs
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      # Three flags, three distinct failure modes this repo refuses to ship.
+      #
+      # `--all-systems`: without it, `nix flake check` evaluates only the checks
+      # for the RUNNER's own system, prints "omitted these incompatible systems"
+      # as a warning, and exits 0. This flake declares aarch64-linux as well as
+      # x86_64-linux, so half of what it claims to check went unevaluated while
+      # CI reported green — a check that passed having tested nothing. (For the
+      # foreign system Nix evaluates the derivations without building them,
+      # which is why one x86_64 runner can honestly check both.)
+      #
+      # `--keep-going`: one failing check must not abort the others. Without it
+      # the first failure hides every result behind it, so a run reports one
+      # problem when there are three and the next push discovers the second.
+      #
+      # `--print-build-logs`: a failing check's own output — the unittest
+      # traceback, the `throw` message — belongs in the run log, not behind a
+      # local reproduction.
+      - name: nix flake check (all systems)
+        run: nix flake check --all-systems --keep-going --print-build-logs
