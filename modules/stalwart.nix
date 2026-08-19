@@ -478,13 +478,29 @@ let
     ++ [ webuiOp spamSettingsOp ]
     ++ cfg.bootstrap.extraPlanOps;
 
-  applyPlan = pkgs.writeText "stalwart-apply.ndjson" (
-    concatStringsSep "\n" (map builtins.toJSON planOps) + "\n"
-  );
+  # The rendered plan body, bound as a Nix STRING rather than inlined into the
+  # `writeText` call below, so that `planHash` can be taken from the string
+  # itself. That is the whole reason this binding exists.
+  #
+  # Hashing the FILE instead (`builtins.readFile applyPlan`) is
+  # import-from-derivation: it forces the plan derivation to be BUILT during
+  # evaluation. On a host evaluating its own system that is merely slow; on an
+  # x86_64 evaluator checking the aarch64-linux instance of this module -- which
+  # is exactly what `nix flake check --all-systems` does -- it demands a build
+  # for a platform the evaluator cannot run, and the check fails on the
+  # evaluation rather than on anything about the configuration. Hashing the
+  # string keeps evaluation pure: nothing is built to decide what the plan is.
+  #
+  # The two are the same bytes by construction -- `writeText` writes its text
+  # argument verbatim -- so the recorded hash, and therefore the marker file
+  # already sitting on every deployed host, are unchanged by this.
+  applyPlanText = concatStringsSep "\n" (map builtins.toJSON planOps) + "\n";
+
+  applyPlan = pkgs.writeText "stalwart-apply.ndjson" applyPlanText;
 
   # Hash of the rendered plan -- the bootstrap unit applies once per plan
   # version (identified by this hash), never on every boot.
-  planHash = builtins.hashString "sha256" (builtins.readFile applyPlan);
+  planHash = builtins.hashString "sha256" applyPlanText;
 
   # ── Mutable runtime settings (idempotent `update` ops) ────────────────────
   #
@@ -563,13 +579,16 @@ let
     })
     ++ cfg.limits.extraSettingsOps;
 
-  settingsPlan = pkgs.writeText "stalwart-settings.ndjson" (
-    concatStringsSep "\n" (map builtins.toJSON settingsOps) + "\n"
-  );
+  # Bound as a string for the same reason `applyPlanText` is -- see its comment
+  # for why hashing the rendered file rather than the string is
+  # import-from-derivation, and why the bytes are identical either way.
+  settingsPlanText = concatStringsSep "\n" (map builtins.toJSON settingsOps) + "\n";
+
+  settingsPlan = pkgs.writeText "stalwart-settings.ndjson" settingsPlanText;
 
   # Same marker discipline as the bootstrap plan: the unit re-applies only
   # when the rendered VALUES change, not on every boot.
-  settingsHash = builtins.hashString "sha256" (builtins.readFile settingsPlan);
+  settingsHash = builtins.hashString "sha256" settingsPlanText;
 
   stateDirBaseName = removePrefix "/var/lib/" (toString cfg.stateDir);
 
