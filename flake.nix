@@ -16,7 +16,7 @@
     # for that precedent) -- so a consumer importing `nixosModules.stalwart` sees an ordinary
     # module function and never needs to know `probeFact` exists.
     nixhost = {
-      url = "github:julian-corbet/nixhost-corbet-ch";
+      url = "git+https://github.com/julian-corbet/nixhost-corbet-ch";
       inputs.nixpkgs.follows = "nixpkgs";
     };
   };
